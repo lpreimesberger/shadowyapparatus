@@ -129,11 +129,13 @@ jobs:
         # Sign the binary
         cosign sign-blob \
           --bundle shadowy-linux-amd64.cosign.bundle \
+          --yes \
           shadowy-linux-amd64
           
         # Sign the checksums
         cosign sign-blob \
           --bundle shadowy-linux-amd64.sha256.cosign.bundle \
+          --yes \
           shadowy-linux-amd64.sha256
           
         echo "Signature bundles created:"
@@ -178,10 +180,12 @@ jobs:
         # Sign SBOM files
         cosign sign-blob \
           --bundle shadowy-sbom.spdx.json.cosign.bundle \
+          --yes \
           shadowy-sbom.spdx.json
           
         cosign sign-blob \
           --bundle shadowy-sbom.cyclonedx.json.cosign.bundle \
+          --yes \
           shadowy-sbom.cyclonedx.json
           
     - name: Upload build artifacts
