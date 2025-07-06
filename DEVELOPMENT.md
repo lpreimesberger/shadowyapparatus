@@ -6,7 +6,7 @@ This guide covers the development workflow, tools, and best practices for the Sh
 
 ### Prerequisites
 
-- **Go 1.21+**: [Install Go](https://golang.org/doc/install)
+- **Go 1.24.1+**: [Install Go](https://golang.org/doc/install)
 - **Git**: For version control
 - **golangci-lint**: For code quality (optional for development)
 
@@ -386,7 +386,7 @@ API endpoints are documented inline and tested via scripts:
 
 ### Development Environment Issues
 
-1. **Check Go version**: `go version` (should be 1.21+)
+1. **Check Go version**: `go version` (should be 1.24.1+)
 2. **Update dependencies**: `go mod tidy`
 3. **Clear caches**: `go clean -cache -modcache`
 4. **Check environment**: `go env`

@@ -1,8 +1,8 @@
 module shadowy
 
-go 1.23.0
+go 1.24.1
 
-toolchain go1.23.10
+toolchain go1.24.1
 
 require (
 	github.com/cloudflare/circl v1.6.1
