@@ -2,8 +2,6 @@ module shadowy
 
 go 1.24.1
 
-toolchain go1.24.1
-
 require (
 	github.com/cloudflare/circl v1.6.1
 	github.com/dgraph-io/badger/v4 v4.7.0

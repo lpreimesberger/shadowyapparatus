@@ -58,6 +58,9 @@ type TimelordJob struct {
 	CompletedAt *time.Time    `json:"completed_at,omitempty"`
 	Result      *VDFResult    `json:"result,omitempty"`
 	Status      JobStatus     `json:"status"`
+	
+	// Mutex to protect concurrent access to job fields
+	mutex sync.RWMutex `json:"-"`
 }
 
 // JobStatus represents the status of a timelord job
@@ -85,6 +88,66 @@ func (js JobStatus) String() string {
 		return "timeout"
 	default:
 		return "unknown"
+	}
+}
+
+// GetStatus safely returns the job status
+func (job *TimelordJob) GetStatus() JobStatus {
+	job.mutex.RLock()
+	defer job.mutex.RUnlock()
+	return job.Status
+}
+
+// SetStatus safely sets the job status
+func (job *TimelordJob) SetStatus(status JobStatus) {
+	job.mutex.Lock()
+	defer job.mutex.Unlock()
+	job.Status = status
+}
+
+// GetResult safely returns the job result
+func (job *TimelordJob) GetResult() *VDFResult {
+	job.mutex.RLock()
+	defer job.mutex.RUnlock()
+	return job.Result
+}
+
+// SetResult safely sets the job result
+func (job *TimelordJob) SetResult(result *VDFResult) {
+	job.mutex.Lock()
+	defer job.mutex.Unlock()
+	job.Result = result
+}
+
+// SetCompletedAt safely sets the completion time
+func (job *TimelordJob) SetCompletedAt(completedAt *time.Time) {
+	job.mutex.Lock()
+	defer job.mutex.Unlock()
+	job.CompletedAt = completedAt
+}
+
+// SetStartedAt safely sets the start time
+func (job *TimelordJob) SetStartedAt(startedAt *time.Time) {
+	job.mutex.Lock()
+	defer job.mutex.Unlock()
+	job.StartedAt = startedAt
+}
+
+// GetJobInfo safely returns a copy of the job information
+func (job *TimelordJob) GetJobInfo() TimelordJob {
+	job.mutex.RLock()
+	defer job.mutex.RUnlock()
+	
+	// Return a copy to avoid race conditions
+	return TimelordJob{
+		ID:          job.ID,
+		Challenge:   job.Challenge,
+		Priority:    job.Priority,
+		SubmittedAt: job.SubmittedAt,
+		StartedAt:   job.StartedAt,
+		CompletedAt: job.CompletedAt,
+		Result:      job.Result,
+		Status:      job.Status,
 	}
 }
 
@@ -261,7 +324,9 @@ func (tl *Timelord) GetJob(jobID string) (*TimelordJob, error) {
 		return nil, fmt.Errorf("job not found: %s", jobID)
 	}
 	
-	return job, nil
+	// Return a safe copy to avoid race conditions
+	jobCopy := job.GetJobInfo()
+	return &jobCopy, nil
 }
 
 // GetStats returns current timelord statistics
@@ -273,7 +338,8 @@ func (tl *Timelord) GetStats() TimelordStats {
 	tl.jobsMutex.RLock()
 	pendingCount := 0
 	for _, job := range tl.jobs {
-		if job.Status == JobStatusPending || job.Status == JobStatusRunning {
+		status := job.GetStatus()
+		if status == JobStatusPending || status == JobStatusRunning {
 			pendingCount++
 		}
 	}
@@ -306,8 +372,8 @@ func (tw *TimelordWorker) processJob(job *TimelordJob) {
 	
 	// Update job status
 	now := time.Now().UTC()
-	job.StartedAt = &now
-	job.Status = JobStatusRunning
+	job.SetStartedAt(&now)
+	job.SetStatus(JobStatusRunning)
 	
 	tw.timelord.updateStats(func(stats *TimelordStats) {
 		stats.ActiveWorkers++
@@ -352,10 +418,10 @@ func (tw *TimelordWorker) processJob(job *TimelordJob) {
 	// Wait for result or timeout
 	select {
 	case <-jobCtx.Done():
-		job.Status = JobStatusTimeout
-		job.Result = &VDFResult{
+		job.SetStatus(JobStatusTimeout)
+		job.SetResult(&VDFResult{
 			Error: "job timed out",
-		}
+		})
 		tw.timelord.updateStats(func(stats *TimelordStats) {
 			stats.TimeoutJobs++
 			stats.ActiveWorkers--
@@ -363,17 +429,17 @@ func (tw *TimelordWorker) processJob(job *TimelordJob) {
 		
 	case result := <-resultChan:
 		completedAt := time.Now().UTC()
-		job.CompletedAt = &completedAt
-		job.Result = result
+		job.SetCompletedAt(&completedAt)
+		job.SetResult(result)
 		
 		if result.Error != "" {
-			job.Status = JobStatusFailed
+			job.SetStatus(JobStatusFailed)
 			tw.timelord.updateStats(func(stats *TimelordStats) {
 				stats.FailedJobs++
 				stats.ActiveWorkers--
 			})
 		} else {
-			job.Status = JobStatusCompleted
+			job.SetStatus(JobStatusCompleted)
 			proofTime := result.Proof.ComputeTime
 			
 			tw.timelord.updateStats(func(stats *TimelordStats) {
@@ -470,8 +536,10 @@ func (tl *Timelord) cleanupExpiredJobs() {
 			tl.jobsMutex.Lock()
 			cleaned := 0
 			for id, job := range tl.jobs {
-				if job.Status == JobStatusCompleted || job.Status == JobStatusFailed || job.Status == JobStatusTimeout {
-					if job.CompletedAt != nil && job.CompletedAt.Before(cutoff) {
+				status := job.GetStatus()
+				if status == JobStatusCompleted || status == JobStatusFailed || status == JobStatusTimeout {
+					jobInfo := job.GetJobInfo()
+					if jobInfo.CompletedAt != nil && jobInfo.CompletedAt.Before(cutoff) {
 						delete(tl.jobs, id)
 						cleaned++
 					}
