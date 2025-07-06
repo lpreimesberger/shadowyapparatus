@@ -1,0 +1,343 @@
+name: Continuous Integration
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  lint:
+    name: Lint and Format Check
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+        
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+          
+    - name: Install dependencies
+      run: go mod tidy
+      
+    - name: Verify go mod
+      run: |
+        go mod verify
+        if [ ! -z "$(git status --porcelain go.mod go.sum)" ]; then
+          echo "go.mod or go.sum is not up to date"
+          git diff go.mod go.sum
+          exit 1
+        fi
+        
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v4
+      with:
+        version: latest
+        args: --timeout=5m
+        
+    - name: Check Go formatting
+      run: |
+        if [ -n "$(gofmt -l .)" ]; then
+          echo "Go code is not formatted:"
+          gofmt -l .
+          exit 1
+        fi
+        
+    - name: Run go vet
+      run: go vet ./...
+      
+    - name: Check for security issues
+      run: |
+        go install github.com/securecodewarrior/gosec/v2/cmd/gosec@latest
+        gosec ./...
+
+  test:
+    name: Test Suite
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.20', '1.21']
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go ${{ matrix.go-version }}
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+        
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-${{ matrix.go-version }}-
+          
+    - name: Install dependencies
+      run: go mod tidy
+      
+    - name: Run unit tests
+      run: |
+        go test -v -race -coverprofile=coverage.out ./...
+        
+    - name: Generate coverage report
+      run: |
+        go tool cover -html=coverage.out -o coverage.html
+        go tool cover -func=coverage.out
+        
+    - name: Upload coverage to Codecov
+      if: matrix.go-version == '1.21'
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.out
+        flags: unittests
+        name: codecov-umbrella
+        
+    - name: Upload coverage artifact
+      if: matrix.go-version == '1.21'
+      uses: actions/upload-artifact@v4
+      with:
+        name: coverage-report
+        path: |
+          coverage.out
+          coverage.html
+        retention-days: 7
+
+  build:
+    name: Build Test
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    
+    strategy:
+      matrix:
+        goos: [linux]
+        goarch: [amd64]
+        
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+        
+    - name: Cache Go modules
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/go-build
+          ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+          
+    - name: Install dependencies
+      run: go mod tidy
+      
+    - name: Build binary
+      env:
+        CGO_ENABLED: 0
+        GOOS: ${{ matrix.goos }}
+        GOARCH: ${{ matrix.goarch }}
+      run: |
+        VERSION="0.1+$(git rev-list --count HEAD)"
+        COMMIT_SHA=$(git rev-parse --short HEAD)
+        BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+        
+        go build \
+          -ldflags="-s -w -X main.Version=${VERSION} -X main.GitCommit=${COMMIT_SHA} -X main.BuildTime=${BUILD_TIME}" \
+          -o shadowy-${{ matrix.goos }}-${{ matrix.goarch }} \
+          .
+          
+    - name: Test binary
+      if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+      run: |
+        chmod +x shadowy-${{ matrix.goos }}-${{ matrix.goarch }}
+        ./shadowy-${{ matrix.goos }}-${{ matrix.goarch }} version
+        ./shadowy-${{ matrix.goos }}-${{ matrix.goarch }} version --verbose
+        ./shadowy-${{ matrix.goos }}-${{ matrix.goarch }} version --json
+        ./shadowy-${{ matrix.goos }}-${{ matrix.goarch }} --help
+        
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: shadowy-${{ matrix.goos }}-${{ matrix.goarch }}
+        path: shadowy-${{ matrix.goos }}-${{ matrix.goarch }}
+        retention-days: 7
+
+  integration-test:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download build artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: shadowy-linux-amd64
+        path: .
+        
+    - name: Make binary executable
+      run: chmod +x shadowy-linux-amd64
+      
+    - name: Create test data directory
+      run: |
+        mkdir -p test_data
+        mkdir -p test_plots
+        
+    - name: Test basic functionality
+      timeout-minutes: 5
+      run: |
+        # Test version command
+        ./shadowy-linux-amd64 version
+        
+        # Test help command
+        ./shadowy-linux-amd64 --help
+        
+        # Test wallet creation
+        ./shadowy-linux-amd64 wallet create test-wallet
+        
+        # Test wallet listing
+        ./shadowy-linux-amd64 wallet list
+        
+        echo "✅ Basic functionality tests passed"
+        
+    - name: Test API endpoints
+      timeout-minutes: 10
+      run: |
+        # Start node in background
+        ./shadowy-linux-amd64 node --http-port=8080 > node.log 2>&1 &
+        NODE_PID=$!
+        
+        # Wait for node to start
+        sleep 15
+        
+        # Test health endpoint
+        curl -f http://localhost:8080/api/v1/health
+        
+        # Test status endpoint
+        curl -f http://localhost:8080/api/v1/status
+        
+        # Test blockchain endpoint
+        curl -f http://localhost:8080/api/v1/blockchain
+        
+        # Stop node
+        kill $NODE_PID 2>/dev/null || true
+        wait $NODE_PID 2>/dev/null || true
+        
+        echo "✅ API endpoint tests passed"
+        
+    - name: Test mining scripts
+      timeout-minutes: 5
+      run: |
+        # Make scripts executable
+        chmod +x scripts/*.sh
+        
+        # Test script syntax
+        bash -n scripts/health.sh
+        bash -n scripts/blockchain.sh
+        bash -n scripts/consensus.sh
+        bash -n test_multinode.sh
+        
+        echo "✅ Script syntax tests passed"
+        
+    - name: Upload test logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: integration-test-logs
+        path: |
+          node.log
+          test_data/
+        retention-days: 3
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Download build artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: shadowy-linux-amd64
+        path: .
+        
+    - name: Run Trivy vulnerability scanner on code
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-code-results.sarif'
+        
+    - name: Run Trivy vulnerability scanner on binary
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: './shadowy-linux-amd64'
+        format: 'table'
+        
+    - name: Upload Trivy scan results
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-code-results.sarif'
+        
+    - name: Check for secrets
+      uses: trufflesecurity/trufflehog@main
+      with:
+        path: ./
+        base: main
+        head: HEAD
+        extra_args: --debug --only-verified
+
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+        
+    - name: Run benchmarks
+      run: |
+        go test -bench=. -benchmem -benchtime=30s ./... > benchmark_results.txt
+        cat benchmark_results.txt
+        
+    - name: Upload benchmark results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: benchmark_results.txt
+        retention-days: 7
