@@ -43,10 +43,14 @@ jobs:
         fi
         
     - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v4
+      uses: golangci/golangci-lint-action@v6
       with:
-        version: latest
-        args: --timeout=5m
+        version: v1.59.1
+        args: --timeout=5m --verbose
+        skip-cache: false
+        skip-pkg-cache: false
+        skip-build-cache: false
+      continue-on-error: false
         
     - name: Check Go formatting
       run: |

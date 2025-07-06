@@ -1,140 +1,226 @@
+# golangci-lint configuration for Shadowy blockchain project
+# Compatible with golangci-lint v1.55+
+
 run:
   timeout: 5m
   go: "1.21"
   skip-dirs:
-    - "vendor"
-    - "test_data"
-    - "multinode_logs"
-    - "burn_in_logs"
-    - "node1_data"
-    - "node2_data"
+    - vendor
+    - test_data
+    - multinode_logs
+    - burn_in_logs
+    - node1_data
+    - node2_data
+    - .git
+  skip-files:
+    - ".*\\.pb\\.go$"
+    - ".*_gen\\.go$"
 
 linters-settings:
-  golint:
-    min-confidence: 0.8
+  # Cyclomatic complexity
   gocyclo:
     min-complexity: 15
-  goimports:
-    local-prefixes: "github.com/lpreimesberger/shadowy"
-  goconst:
-    min-len: 3
-    min-occurrences: 3
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-      - experimental
-    disabled-checks:
-      - wrapperFunc
-      - dupImport
+  
+  # Cognitive complexity
+  gocognit:
+    min-complexity: 20
+  
+  # Function length
   funlen:
     lines: 100
     statements: 50
-  gocognit:
-    min-complexity: 20
-  nestif:
-    min-complexity: 4
+  
+  # Line length
   lll:
     line-length: 120
-  misspell:
-    locale: US
-  unused:
-    check-exported: false
-  unparam:
-    check-exported: false
+  
+  # Constants detection
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+  
+  # Import organization
+  goimports:
+    local-prefixes: github.com/lpreimesberger/shadowy
+  
+  # Nested if statements
+  nestif:
+    min-complexity: 4
+  
+  # Naked returns
   nakedret:
     max-func-lines: 30
-  prealloc:
-    simple: true
-    range-loops: true
-    for-loops: false
-  godox:
-    keywords:
-      - NOTE
-      - OPTIMIZE
-      - HACK
-  gomod:
-    go-version: "1.21"
   
+  # Misspell checker
+  misspell:
+    locale: US
+  
+  # Comments on exported functions
+  revive:
+    min-confidence: 0.8
+    rules:
+      - name: exported
+        arguments: [checkPrivateReceivers, sayRepetitiveInsteadOfStutters]
+      - name: var-naming
+      - name: package-comments
+        disabled: true  # Allow packages without comments
+  
+  # Security checker exclusions
+  gosec:
+    excludes:
+      - G404  # Use of weak random number generator (OK for non-crypto use)
+      - G204  # Subprocess launched with variable (needed for scripts)
+      - G304  # File path provided as taint input (needed for config files)
+  
+  # GoVet settings
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment  # Don't require optimal struct field alignment
+  
+  # Unused code detection
+  unused:
+    check-exported: false
+  
+  # Ineffective assignments
+  ineffassign:
+    check-generated: false
+
 linters:
   enable:
-    - asciicheck
-    - bodyclose
-    - deadcode
-    - depguard
-    - dogsled
-    - dupl
-    - errcheck
-    - exportloopref
-    - exhaustive
-    - funlen
-    - gochecknoinits
-    - gocognit
-    - goconst
-    - gocritic
-    - gocyclo
-    - godox
-    - gofmt
-    - goimports
-    - golint
-    - gomnd
-    - gomod
-    - goprintffuncname
-    - gosec
-    - gosimple
-    - govet
-    - ineffassign
-    - interfacer
-    - lll
-    - maligned
-    - misspell
-    - nakedret
-    - nestif
-    - noctx
-    - nolintlint
-    - prealloc
-    - rowserrcheck
-    - scopelint
-    - staticcheck
-    - structcheck
-    - stylecheck
-    - typecheck
-    - unconvert
-    - unparam
-    - unused
-    - varcheck
-    - whitespace
+    # Essential linters
+    - errcheck      # Check for unchecked errors
+    - gosimple      # Simplify code
+    - govet         # Go vet tool
+    - ineffassign   # Detect ineffectual assignments
+    - staticcheck   # Advanced static analysis
+    - typecheck     # Type checking
+    - unused        # Find unused code
+    
+    # Code quality
+    - gocyclo       # Cyclomatic complexity
+    - gocognit      # Cognitive complexity
+    - funlen        # Function length
+    - nestif        # Nested if statements
+    - goconst       # Repeated strings that could be constants
+    
+    # Formatting and style
+    - gofmt         # Check formatting
+    - goimports     # Check import organization
+    - misspell      # Check spelling
+    - whitespace    # Check for unnecessary whitespace
+    
+    # Best practices
+    - gocritic      # Opinionated linter
+    - revive        # Replacement for golint
+    - stylecheck    # Style checker
+    - unconvert     # Remove unnecessary type conversions
+    
+    # Security
+    - gosec         # Security checker
+    
+    # Performance
+    - prealloc      # Find slice declarations that could potentially be pre-allocated
+    
+    # Miscellaneous
+    - asciicheck    # Non-ASCII characters
+    - bodyclose     # HTTP response body closing
+    - dogsled       # Blank identifier assignments
+    - dupl          # Code duplication
+    - exportloopref # Exported loop variables
+    - lll           # Line length
+    - nakedret      # Naked returns
+    - nolintlint    # Nolint directive formatting
+    
   disable:
-    - gochecknoglobals
-    - gocognit
-    - testpackage
+    # Disabled linters (too strict or not applicable)
+    - gochecknoglobals  # Allow global variables (needed for CLI)
+    - gochecknoinits    # Allow init functions (needed for CLI)
+    - testpackage       # Don't require separate test packages
+    - paralleltest      # Don't require parallel tests
+    - exhaustive        # Don't require exhaustive switch statements
+    - exhaustruct       # Don't require all struct fields
+    - forbidigo         # Don't forbid specific function calls
+    - godox             # Allow TODO/FIXME comments
+    - goerr113          # Don't require wrapped errors everywhere
+    - goheader          # Don't require file headers
+    - goprintffuncname  # Don't check printf-style function names
+    - ireturn           # Allow interface returns
+    - nlreturn          # Don't require newlines before returns
+    - noctx             # Allow HTTP requests without context
+    - rowserrcheck      # Don't check SQL row errors (not using SQL)
+    - tagliatelle       # Don't check struct tag format
+    - varnamelen        # Don't check variable name length
+    - wrapcheck         # Don't require error wrapping everywhere
+    - wsl               # Don't enforce whitespace rules
 
 issues:
+  # Maximum issues count per one linter
+  max-issues-per-linter: 0
+  
+  # Maximum count of issues with the same text
+  max-same-issues: 0
+  
+  # Show only new issues
+  new: false
+  
+  # Exclude rules
   exclude-rules:
+    # Exclude some linters from running on tests files
     - path: _test\.go
       linters:
-        - gomnd
-        - goconst
+        - gocyclo
+        - errcheck
+        - dupl
+        - gosec
         - funlen
+        - goconst
+        - gocognit
+        - nestif
         - lll
+    
+    # Exclude some linters from running on main.go
+    - path: main\.go
+      linters:
+        - gochecknoinits
+        - revive
+    
+    # Exclude some linters from cmd package (CLI setup)
     - path: cmd/
       linters:
         - gochecknoinits
-    - text: "G404: Use of weak random number generator"
-      linters:
+        - gochecknoglobals
+      text: "should not use init function"
+    
+    # Exclude revive package comment requirement
+    - linters:
+        - revive
+      text: "package-comments"
+    
+    # Exclude some security warnings for development tools
+    - linters:
         - gosec
-    - text: "G204: Subprocess launched with variable"
-      linters:
-        - gosec
-    - source: "//nolint"
-      linters:
-        - lll
-  exclude-use-default: false
-  max-issues-per-linter: 0
-  max-same-issues: 0
+      text: "G204: Subprocess launched with"
+      path: scripts/
+    
+    # Allow TODO comments in development
+    - linters:
+        - godox
+      text: "TODO"
 
 output:
-  format: colored-line-number
+  # Output format
+  formats:
+    - format: colored-line-number
+  
+  # Print lines of code with issue
   print-issued-lines: true
+  
+  # Print linter name in the end of issue text
   print-linter-name: true
+  
+  # Make issues output unique by line
+  uniq-by-line: true
+  
+  # Sort results by: filepath, line and column
+  sort-results: true
