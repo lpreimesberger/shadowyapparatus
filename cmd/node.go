@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -33,7 +34,6 @@ type NodeConfig struct {
 	EnableMining     bool     `json:"enable_mining"`
 	EnableConsensus  bool     `json:"enable_consensus"`
 	MiningAddress    string   `json:"mining_address"`
-	BootstrapPeers   []string `json:"bootstrap_peers"`
 	
 	// Service-specific settings
 	MaxConnections    int           `json:"max_connections"`
@@ -57,7 +57,6 @@ func DefaultNodeConfig() *NodeConfig {
 		EnableMining:      true,  // Enabled by default
 		EnableConsensus:   true,  // Enabled by default
 		MiningAddress:     "",    // Will be set from default wallet
-		BootstrapPeers:    []string{}, // No bootstrap peers by default
 		MaxConnections:    1000,
 		ShutdownTimeout:   30 * time.Second,
 		HealthCheckPeriod: 30 * time.Second,
@@ -144,6 +143,12 @@ func (sn *ShadowNode) initializeServices() error {
 
 	// Initialize mempool
 	sn.mempool = NewMempool(sn.config.MempoolConfig)
+	
+	// Enable transaction broadcasting if consensus is enabled
+	if sn.config.EnableConsensus {
+		sn.config.MempoolConfig.EnableBroadcast = true
+	}
+	
 	sn.updateHealthStatus("mempool", "healthy", nil, map[string]interface{}{
 		"max_size": sn.config.MempoolConfig.MaxMempoolSize,
 		"max_txs":  sn.config.MempoolConfig.MaxTransactions,
@@ -168,19 +173,21 @@ func (sn *ShadowNode) initializeServices() error {
 	
 	// Initialize miner (if enabled)
 	if sn.config.EnableMining {
-		// Get mining address (use default wallet if not specified)
+		// Get mining address (ensure wallet exists)
 		miningAddress := sn.config.MiningAddress
 		if miningAddress == "" {
-			// Try to get address from first available wallet
-			wallets, err := listWallets()
-			if err == nil && len(wallets) > 0 {
-				if wallet, err := loadWallet(wallets[0].Name); err == nil {
-					miningAddress = wallet.Address
-				}
+			// Ensure we have a wallet for mining rewards
+			wallet, err := ensureDefaultWallet()
+			if err != nil {
+				return fmt.Errorf("failed to ensure default wallet exists: %w", err)
 			}
-			// Fallback to genesis address if no wallets
-			if miningAddress == "" {
-				miningAddress = "S42618a7524a82df51c8a2406321e161de65073008806f042f0"
+			miningAddress = wallet.Address
+			log.Printf("Using default wallet for mining: %s", wallet.Name)
+		} else {
+			// Validate that the specified mining address corresponds to a known wallet
+			if !hasWalletForAddress(miningAddress) {
+				log.Printf("⚠️  Warning: Mining address %s does not correspond to any local wallet", miningAddress)
+				log.Printf("⚠️  Mining rewards will be sent to an address you may not control")
 			}
 		}
 		
@@ -193,7 +200,14 @@ func (sn *ShadowNode) initializeServices() error {
 	
 	// Initialize consensus engine (if enabled)
 	if sn.config.EnableConsensus {
-		sn.consensus = NewConsensusEngine(sn.config.ConsensusConfig, sn.blockchain, sn.mempool)
+		sn.consensus = NewConsensusEngine(sn.config.ConsensusConfig, sn.blockchain, sn.mempool, sn.miner, sn.farmingService, sn.config.HTTPPort)
+		
+		// Connect consensus engine as the blockchain broadcaster
+		sn.blockchain.SetBroadcaster(sn.consensus)
+		
+		// Connect consensus engine as the mempool transaction broadcaster
+		sn.mempool.SetBroadcaster(sn.consensus)
+		
 		sn.updateHealthStatus("consensus", "healthy", nil, map[string]interface{}{
 			"node_id":     sn.consensus.nodeID,
 			"listen_addr": sn.consensus.listenAddr,
@@ -595,6 +609,57 @@ func defaultShadowConfig() *ShadowConfig {
 	}
 }
 
+// isPortAvailable checks if a port is available for binding
+func isPortAvailable(port int) bool {
+	addr := fmt.Sprintf(":%d", port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return false
+	}
+	listener.Close()
+	return true
+}
+
+// findAvailablePort finds an available port starting from the preferred port
+func findAvailablePort(preferredPort int, maxTries int) int {
+	if maxTries <= 0 {
+		maxTries = 100
+	}
+	
+	for i := 0; i < maxTries; i++ {
+		port := preferredPort + i
+		if isPortAvailable(port) {
+			return port
+		}
+	}
+	
+	// If no port found in the range, return -1 to indicate failure
+	return -1
+}
+
+// allocateNodePorts finds available ports for all node services
+func allocateNodePorts(preferredHTTP, preferredGRPC, preferredP2P int) (httpPort, grpcPort, p2pPort int, err error) {
+	// Find HTTP port
+	httpPort = findAvailablePort(preferredHTTP, 100)
+	if httpPort == -1 {
+		return 0, 0, 0, fmt.Errorf("could not find available HTTP port starting from %d", preferredHTTP)
+	}
+	
+	// Find gRPC port  
+	grpcPort = findAvailablePort(preferredGRPC, 100)
+	if grpcPort == -1 {
+		return 0, 0, 0, fmt.Errorf("could not find available gRPC port starting from %d", preferredGRPC)
+	}
+	
+	// Find P2P port
+	p2pPort = findAvailablePort(preferredP2P, 100)
+	if p2pPort == -1 {
+		return 0, 0, 0, fmt.Errorf("could not find available P2P port starting from %d", preferredP2P)
+	}
+	
+	return httpPort, grpcPort, p2pPort, nil
+}
+
 // Node CLI command
 var nodeCmd = &cobra.Command{
 	Use:   "node",
@@ -611,6 +676,9 @@ var nodeCmd = &cobra.Command{
 		if grpcPort, _ := cmd.Flags().GetInt("grpc-port"); grpcPort != 0 {
 			config.GRPCPort = grpcPort
 		}
+		if miningAddr, _ := cmd.Flags().GetString("mining-address"); miningAddr != "" {
+			config.MiningAddress = miningAddr
+		}
 		if enableTimelord, _ := cmd.Flags().GetBool("enable-timelord"); enableTimelord {
 			config.EnableTimelord = true
 		}
@@ -620,9 +688,57 @@ var nodeCmd = &cobra.Command{
 		if consensusPort, _ := cmd.Flags().GetString("consensus-port"); consensusPort != "" {
 			config.ConsensusConfig.ListenAddr = "0.0.0.0:" + consensusPort
 		}
-		if bootstrapPeers, _ := cmd.Flags().GetStringSlice("bootstrap-peers"); len(bootstrapPeers) > 0 {
-			config.BootstrapPeers = bootstrapPeers
-			config.ConsensusConfig.BootstrapPeers = bootstrapPeers
+		if devMode, _ := cmd.Flags().GetBool("dev-mode"); devMode {
+			config.ShadowConfig.DevMode = true
+			log.Printf("🚀 Development mode enabled - fast block mining activated!")
+		}
+		
+		// Allocate available ports if not explicitly set
+		preferredHTTP := config.HTTPPort
+		preferredGRPC := config.GRPCPort
+		preferredP2P := 8888 // Extract P2P port from consensus config
+		
+		// Extract current P2P port from ListenAddr if set
+		if config.ConsensusConfig != nil && config.ConsensusConfig.ListenAddr != "" {
+			if _, portStr, err := net.SplitHostPort(config.ConsensusConfig.ListenAddr); err == nil {
+				if port, err := net.LookupPort("tcp", portStr); err == nil && port > 0 {
+					preferredP2P = port
+				}
+			}
+		}
+		
+		// Only allocate ports dynamically if not explicitly set via flags
+		httpPortChanged := cmd.Flags().Changed("http-port")
+		grpcPortChanged := cmd.Flags().Changed("grpc-port") 
+		consensusPortChanged := cmd.Flags().Changed("consensus-port")
+		
+		if !httpPortChanged || !grpcPortChanged || !consensusPortChanged {
+			httpPort, grpcPort, p2pPort, err := allocateNodePorts(preferredHTTP, preferredGRPC, preferredP2P)
+			if err != nil {
+				fmt.Printf("Error allocating ports: %v\n", err)
+				os.Exit(1)
+			}
+			
+			// Update config with allocated ports
+			if !httpPortChanged {
+				config.HTTPPort = httpPort
+				if httpPort != preferredHTTP {
+					log.Printf("📡 HTTP server using port %d (preferred %d was unavailable)", httpPort, preferredHTTP)
+				}
+			}
+			if !grpcPortChanged {
+				config.GRPCPort = grpcPort
+				if grpcPort != preferredGRPC {
+					log.Printf("📡 gRPC server using port %d (preferred %d was unavailable)", grpcPort, preferredGRPC)
+				}
+			}
+			if !consensusPortChanged {
+				config.ConsensusConfig.ListenAddr = fmt.Sprintf("0.0.0.0:%d", p2pPort)
+				config.ShadowConfig.ListenOn = fmt.Sprintf("0.0.0.0:%d", p2pPort)
+				if p2pPort != preferredP2P {
+					log.Printf("📡 P2P consensus using port %d (preferred %d was unavailable)", p2pPort, preferredP2P)
+				}
+			}
 		}
 		
 		// Create and start node
@@ -644,16 +760,37 @@ var nodeCmd = &cobra.Command{
 	},
 }
 
+// hasWalletForAddress checks if we have a wallet file for the given address
+func hasWalletForAddress(address string) bool {
+	wallets, err := listWalletsInternal() // Use internal to avoid auto-creation
+	if err != nil {
+		return false
+	}
+
+	for _, wallet := range wallets {
+		// Load wallet to get full details including address
+		fullWallet, err := loadWallet(wallet.Name)
+		if err != nil {
+			continue
+		}
+		if fullWallet.Address == address {
+			return true
+		}
+	}
+	return false
+}
+
 func init() {
 	rootCmd.AddCommand(nodeCmd)
-	
+
 	nodeCmd.Flags().Int("http-port", 8080, "HTTP API server port")
 	nodeCmd.Flags().Int("grpc-port", 9090, "gRPC server port")
+	nodeCmd.Flags().String("mining-address", "", "Specific mining address to use (if not set, uses default wallet)")
 	nodeCmd.Flags().Bool("enable-timelord", false, "Enable timelord VDF service")
 	nodeCmd.Flags().Bool("disable-http", false, "Disable HTTP API server")
 	nodeCmd.Flags().Bool("disable-grpc", false, "Disable gRPC server")
 	nodeCmd.Flags().Bool("disable-consensus", false, "Disable consensus engine")
 	nodeCmd.Flags().String("consensus-port", "8888", "Consensus P2P port")
-	nodeCmd.Flags().StringSlice("bootstrap-peers", []string{}, "Bootstrap peer addresses (e.g., host:port)")
 	nodeCmd.Flags().Bool("farming-only", false, "Run in farming-only mode")
+	nodeCmd.Flags().Bool("dev-mode", false, "Enable development mode (fast 30s block times for testing)")
 }
