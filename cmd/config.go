@@ -29,6 +29,7 @@ type ShadowConfig struct {
 	ScratchDirectory  string      `json:"scratch_directory"`
 	BlockchainDirectory string     `json:"blockchain_directory"`
 	TimelordConfig    interface{} `json:"timelord_config,omitempty"`
+	DevMode           bool        `json:"dev_mode"` // Fast mining for development/testing
 	Version           int         `json:"version"`
 	CreatedAt         string      `json:"created_at"`
 	UpdatedAt         string      `json:"updated_at"`
@@ -355,7 +356,7 @@ func loadConfig() (*ShadowConfig, error) {
 			LogLevel:           "info",
 			LoggingDirectory:   filepath.Join(getWalletDir(), "logs"),
 			ScratchDirectory:   filepath.Join(getWalletDir(), "scratch"),
-			BlockchainDirectory: filepath.Join(getWalletDir(), "blockchain"),
+			BlockchainDirectory: "./blockchain",
 			Version:            1,
 			CreatedAt:          getCurrentTimestamp(),
 			UpdatedAt:          getCurrentTimestamp(),
@@ -386,7 +387,7 @@ func loadConfig() (*ShadowConfig, error) {
 	
 	// Handle compatibility for configs without blockchain_directory
 	if config.BlockchainDirectory == "" {
-		config.BlockchainDirectory = filepath.Join(getWalletDir(), "blockchain")
+		config.BlockchainDirectory = "./blockchain"
 		// Auto-save the updated config to include the new field
 		config.UpdatedAt = getCurrentTimestamp()
 		if err := saveConfig(&config); err != nil {

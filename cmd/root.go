@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var BuildNumber = "unknown"
 var rootCmd = &cobra.Command{
 	Use:   "shadowy",
 	Short: "Shadowy - A proof-of-storage cryptocurrency",
@@ -22,5 +23,12 @@ func Execute() {
 }
 
 func init() {
+	// Add persistent flags
+	rootCmd.PersistentFlags().BoolVar(&AllowFork, "fork", false,
+		"Allow creating new testnet genesis blocks instead of bootstrapping from network")
+	rootCmd.PersistentFlags().StringVar(&TrackerURL, "tracker-url", "http://boobies.local:8090",
+		"URL of the tracker service for bootstrapping genesis blocks")
+	
 	rootCmd.AddCommand(plotCmd)
+	rootCmd.AddCommand(chainCmd)
 }

@@ -154,12 +154,20 @@ type Mempool struct {
 	
 	// Validators
 	validators []TransactionValidator
+	
+	// Network broadcasting
+	broadcaster TransactionBroadcaster
 }
 
 // TransactionValidator interface for transaction validation
 type TransactionValidator interface {
 	ValidateTransaction(tx *SignedTransaction) error
 	Name() string
+}
+
+// TransactionBroadcaster interface for broadcasting new transactions to network peers
+type TransactionBroadcaster interface {
+	BroadcastTransaction(tx *SignedTransaction)
 }
 
 // NewMempool creates a new mempool with the given configuration
@@ -198,6 +206,14 @@ func (mp *Mempool) AddValidator(validator TransactionValidator) {
 	defer mp.mu.Unlock()
 	
 	mp.validators = append(mp.validators, validator)
+}
+
+// SetBroadcaster sets the transaction broadcaster for network propagation
+func (mp *Mempool) SetBroadcaster(broadcaster TransactionBroadcaster) {
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	
+	mp.broadcaster = broadcaster
 }
 
 // AddTransaction adds a transaction to the mempool
@@ -269,6 +285,14 @@ func (mp *Mempool) AddTransaction(tx *SignedTransaction, source TransactionSourc
 	
 	// Update statistics
 	mp.updateStats()
+	
+	// Broadcast local and API transactions to network peers (but not network transactions to avoid loops)
+	if mp.config.EnableBroadcast && mp.broadcaster != nil && (source == SourceLocal || source == SourceAPI) {
+		// Release the lock before broadcasting to avoid blocking
+		mp.mu.Unlock()
+		mp.broadcaster.BroadcastTransaction(tx)
+		mp.mu.Lock()
+	}
 	
 	return nil
 }
@@ -440,7 +464,12 @@ func (mp *Mempool) addToIndices(mempoolTx *MempoolTransaction, parsedTx *Transac
 	for _, input := range parsedTx.Inputs {
 		// In a real implementation, we'd resolve the sender from the input
 		// For now, we'll use a placeholder
-		senderAddr := "sender_from_input_" + input.PreviousTxHash[:8]
+		var senderAddr string
+		if len(input.PreviousTxHash) >= 8 {
+			senderAddr = "sender_from_input_" + input.PreviousTxHash[:8]
+		} else {
+			senderAddr = "sender_from_input_unknown"
+		}
 		mp.txBySender[senderAddr] = append(mp.txBySender[senderAddr], mempoolTx)
 	}
 	

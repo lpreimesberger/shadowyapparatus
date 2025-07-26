@@ -11,7 +11,8 @@ import (
 )
 
 const (
-	PrivateKeySize = mldsa87.PrivateKeySize // 4896 bytes
+	SeedSize       = mldsa87.SeedSize       // 32 bytes - for key generation
+	PrivateKeySize = mldsa87.PrivateKeySize // 4896 bytes - full private key
 	PublicKeySize  = mldsa87.PublicKeySize  // 2592 bytes
 	SignatureSize  = mldsa87.SignatureSize  // 4627 bytes
 	AddressSize    = 20                     // Keep same address size
@@ -19,19 +20,36 @@ const (
 )
 
 type KeyPair struct {
-	PrivateKey [PrivateKeySize]byte
+	Seed       [SeedSize]byte       // Store seed for key reconstruction
+	PrivateKey [PrivateKeySize]byte // Cache full private key
 	PublicKey  [PublicKeySize]byte
 	Address    [AddressSize]byte
 	Identifier [IdentifierSize]byte
 }
 
 func GenerateKeyPair() (*KeyPair, error) {
-	pubKey, privKey, err := mldsa87.GenerateKey(rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("failed to generate ML-DSA key pair: %w", err)
+	// Generate a random seed
+	seed := make([]byte, SeedSize)
+	if _, err := rand.Read(seed); err != nil {
+		return nil, fmt.Errorf("failed to generate random seed: %w", err)
+	}
+	
+	// Convert to fixed-size array
+	var seedArray [SeedSize]byte
+	copy(seedArray[:], seed)
+	
+	return NewKeyPairFromSeed(seedArray)
+}
+
+func NewKeyPairFromSeed(seed [SeedSize]byte) (*KeyPair, error) {
+	// Generate key pair from seed
+	pubKey, privKey := mldsa87.NewKeyFromSeed(&seed)
+	if pubKey == nil || privKey == nil {
+		return nil, fmt.Errorf("failed to generate ML-DSA key pair from seed")
 	}
 	
 	kp := &KeyPair{}
+	kp.Seed = seed
 	
 	privKeyBytes := privKey.Bytes()
 	pubKeyBytes := pubKey.Bytes()
@@ -80,13 +98,34 @@ func (kp *KeyPair) IdentifierHex() string {
 	return hex.EncodeToString(kp.Identifier[:])
 }
 
-func (kp *KeyPair) Sign(message []byte) ([]byte, error) {
-	privKey := (*mldsa87.PrivateKey)(unsafe.Pointer(&kp.PrivateKey[0]))
-	signature := make([]byte, SignatureSize)
+func (kp *KeyPair) SeedHex() string {
+	return hex.EncodeToString(kp.Seed[:])
+}
+
+func (kp *KeyPair) Sign(message []byte) (signature []byte, err error) {
+	// Check that seed is valid (not all zeros)
+	allZeros := true
+	for _, b := range kp.Seed {
+		if b != 0 {
+			allZeros = false
+			break
+		}
+	}
+	if allZeros {
+		return nil, fmt.Errorf("key seed is empty or invalid")
+	}
 	
-	err := mldsa87.SignTo(privKey, message, nil, false, signature)
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign message: %w", err)
+	// Reconstruct private key from seed (safe approach)
+	_, privKey := mldsa87.NewKeyFromSeed(&kp.Seed)
+	if privKey == nil {
+		return nil, fmt.Errorf("failed to reconstruct private key from seed")
+	}
+	
+	// Sign the message
+	signature = make([]byte, SignatureSize)
+	signErr := mldsa87.SignTo(privKey, message, nil, false, signature)
+	if signErr != nil {
+		return nil, fmt.Errorf("failed to sign message: %w", signErr)
 	}
 	
 	return signature, nil

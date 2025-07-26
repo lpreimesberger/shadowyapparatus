@@ -49,4 +49,4 @@ rm -f blockchain_test.log
 echo "✓ Blockchain test completed!"
 echo
 echo "Blockchain directory contents:"
-ls -la ~/.shadowy/blockchain/
+ls -la ./blockchain/

@@ -324,37 +324,82 @@ func SignTransactionWithWallet(tx *Transaction, wallet *WalletFile) (*SignedTran
 
 // parseWalletKey converts wallet to KeyPair for signing
 func parseWalletKey(wallet *WalletFile) (*KeyPair, error) {
-	// Decode private key from wallet
+	// Validate wallet input
+	if wallet == nil {
+		return nil, fmt.Errorf("wallet is nil")
+	}
+	if wallet.PrivateKey == "" {
+		return nil, fmt.Errorf("wallet private key is empty")
+	}
+	if wallet.PublicKey == "" {
+		return nil, fmt.Errorf("wallet public key is empty")
+	}
+	if wallet.Address == "" {
+		return nil, fmt.Errorf("wallet address is empty")
+	}
+	
+	// Try to decode as seed first (new format), then fall back to full private key (old format)
 	privKeyBytes, err := hex.DecodeString(wallet.PrivateKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode private key: %w", err)
 	}
 	
-	// Create KeyPair
-	kp := &KeyPair{}
-	if len(privKeyBytes) != PrivateKeySize {
-		return nil, fmt.Errorf("invalid private key size: expected %d, got %d", PrivateKeySize, len(privKeyBytes))
+	// Check if this is a seed (32 bytes) or full private key (4896 bytes)
+	if len(privKeyBytes) == SeedSize {
+		// New format: private key is actually a seed
+		var seed [SeedSize]byte
+		copy(seed[:], privKeyBytes)
+		
+		// Validate seed is not all zeros
+		allZeros := true
+		for _, b := range seed {
+			if b != 0 {
+				allZeros = false
+				break
+			}
+		}
+		if allZeros {
+			return nil, fmt.Errorf("wallet seed contains only zeros (invalid key)")
+		}
+		
+		// Generate key pair from seed
+		return NewKeyPairFromSeed(seed)
+		
+	} else if len(privKeyBytes) == PrivateKeySize {
+		// Old format: full private key stored (legacy wallets)
+		// We need to extract the seed from the full private key
+		// For now, we'll use a hash of the first 32 bytes as seed (not ideal but maintains compatibility)
+		var seed [SeedSize]byte
+		copy(seed[:], privKeyBytes[:SeedSize])
+		
+		// Validate seed is not all zeros
+		allZeros := true
+		for _, b := range seed {
+			if b != 0 {
+				allZeros = false
+				break
+			}
+		}
+		if allZeros {
+			return nil, fmt.Errorf("extracted seed from legacy wallet contains only zeros")
+		}
+		
+		// Try to generate key pair from extracted seed
+		kp, err := NewKeyPairFromSeed(seed)
+		if err != nil {
+			return nil, fmt.Errorf("failed to reconstruct key from legacy wallet: %w", err)
+		}
+		
+		// Verify the public key matches (to ensure we reconstructed correctly)
+		if kp.PublicKeyHex() != wallet.PublicKey {
+			return nil, fmt.Errorf("legacy wallet key reconstruction failed: public key mismatch")
+		}
+		
+		return kp, nil
+		
+	} else {
+		return nil, fmt.Errorf("invalid private key size: expected %d (seed) or %d (full key), got %d", 
+			SeedSize, PrivateKeySize, len(privKeyBytes))
 	}
-	
-	copy(kp.PrivateKey[:], privKeyBytes)
-	
-	// Decode public key
-	pubKeyBytes, err := hex.DecodeString(wallet.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode public key: %w", err)
-	}
-	
-	if len(pubKeyBytes) != PublicKeySize {
-		return nil, fmt.Errorf("invalid public key size: expected %d, got %d", PublicKeySize, len(pubKeyBytes))
-	}
-	
-	copy(kp.PublicKey[:], pubKeyBytes)
-	
-	// Decode address
-	if !IsValidAddress(wallet.Address) {
-		return nil, fmt.Errorf("invalid wallet address: %s", wallet.Address)
-	}
-	
-	return kp, nil
 }
 

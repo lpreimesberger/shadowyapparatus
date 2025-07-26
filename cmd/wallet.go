@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -30,11 +32,38 @@ var (
 type WalletFile struct {
 	Name       string    `json:"name"`
 	Address    string    `json:"address"`
-	PrivateKey string    `json:"private_key"`
+	PrivateKey string    `json:"private_key"` // Version 1: full private key, Version 2+: seed
 	PublicKey  string    `json:"public_key"`
 	Identifier string    `json:"identifier"`
 	CreatedAt  time.Time `json:"created_at"`
 	Version    int       `json:"version"`
+}
+
+// WalletBalance represents the balance information for a wallet
+type WalletBalance struct {
+	Address           string  `json:"address"`
+	ConfirmedBalance  uint64  `json:"confirmed_balance_satoshi"`
+	PendingBalance    uint64  `json:"pending_balance_satoshi"`
+	TotalReceived     uint64  `json:"total_received_satoshi"`
+	TotalSent         uint64  `json:"total_sent_satoshi"`
+	TransactionCount  int     `json:"transaction_count"`
+	LastActivity      *time.Time `json:"last_activity,omitempty"`
+	
+	// Human-readable amounts
+	ConfirmedShadow   float64 `json:"confirmed_shadow"`
+	PendingShadow     float64 `json:"pending_shadow"`
+	TotalReceivedShadow float64 `json:"total_received_shadow"`
+	TotalSentShadow   float64 `json:"total_sent_shadow"`
+}
+
+// TransactionReference represents a transaction involving the wallet
+type TransactionReference struct {
+	TxHash    string    `json:"tx_hash"`
+	BlockHeight uint64  `json:"block_height,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
+	Amount    int64     `json:"amount_satoshi"` // Positive for received, negative for sent
+	Type      string    `json:"type"`           // "received", "sent", "coinbase"
+	Confirmed bool      `json:"confirmed"`
 }
 
 var walletCmd = &cobra.Command{
@@ -69,11 +98,11 @@ If no name is provided, generates a timestamped wallet name.`,
 		wallet := WalletFile{
 			Name:       walletName,
 			Address:    address,
-			PrivateKey: keyPair.PrivateKeyHex(),
+			PrivateKey: keyPair.SeedHex(), // Store seed instead of full private key
 			PublicKey:  keyPair.PublicKeyHex(),
 			Identifier: keyPair.IdentifierHex(),
 			CreatedAt:  time.Now().UTC(),
-			Version:    1,
+			Version:    2, // Increment version to indicate seed-based storage
 		}
 		
 		walletPath, err := saveWallet(wallet)
@@ -143,11 +172,11 @@ var fromKeyCmd = &cobra.Command{
 		wallet := WalletFile{
 			Name:       walletName,
 			Address:    address,
-			PrivateKey: keyPair.PrivateKeyHex(),
+			PrivateKey: keyPair.SeedHex(), // Store seed instead of full private key
 			PublicKey:  keyPair.PublicKeyHex(),
 			Identifier: keyPair.IdentifierHex(),
 			CreatedAt:  time.Now().UTC(),
-			Version:    1,
+			Version:    2, // Increment version to indicate seed-based storage
 		}
 		
 		walletPath, err := saveWallet(wallet)
@@ -189,9 +218,110 @@ var listCmd = &cobra.Command{
 	},
 }
 
+var balanceCmd = &cobra.Command{
+	Use:   "balance [address]",
+	Short: "Check the balance of any Shadowy address",
+	Long: `Check the balance and transaction history of any Shadowy address.
+Scans the blockchain to calculate confirmed balance and recent activity.`,
+	Args:  cobra.ExactArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		address := args[0]
+		
+		// Validate address format
+		if !IsValidAddress(address) {
+			fmt.Printf("Error: Invalid Shadowy address format: %s\n", address)
+			os.Exit(1)
+		}
+		
+		fmt.Printf("╔═══════════════════════════════════════════════════════════════════════════════╗\n")
+		fmt.Printf("║                              ADDRESS BALANCE                                   ║\n")
+		fmt.Printf("╠═══════════════════════════════════════════════════════════════════════════════╣\n")
+		fmt.Printf("║ Address:     %-64s ║\n", address)
+		fmt.Printf("╚═══════════════════════════════════════════════════════════════════════════════╝\n\n")
+		
+		// Get blockchain directory override if specified
+		blockchainDir, _ := cmd.Flags().GetString("data")
+		
+		// Calculate and display balance
+		fmt.Printf("Calculating balance... ")
+		balance, err := calculateWalletBalanceWithDir(address, blockchainDir)
+		if err != nil {
+			fmt.Printf("Error calculating balance: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("✓\n\n")
+		
+		fmt.Printf("╔═══════════════════════════════════════════════════════════════════════════════╗\n")
+		fmt.Printf("║                                BALANCE SUMMARY                                ║\n")
+		fmt.Printf("╠═══════════════════════════════════════════════════════════════════════════════╣\n")
+		fmt.Printf("║ Confirmed Balance:    %15.8f SHADOW (%20d satoshis) ║\n", 
+			balance.ConfirmedShadow, balance.ConfirmedBalance)
+		fmt.Printf("║ Pending Balance:      %15.8f SHADOW (%20d satoshis) ║\n", 
+			balance.PendingShadow, balance.PendingBalance)
+		fmt.Printf("║                                                                               ║\n")
+		fmt.Printf("║ Total Received:       %15.8f SHADOW (%20d satoshis) ║\n", 
+			balance.TotalReceivedShadow, balance.TotalReceived)
+		fmt.Printf("║ Total Sent:           %15.8f SHADOW (%20d satoshis) ║\n", 
+			balance.TotalSentShadow, balance.TotalSent)
+		fmt.Printf("║                                                                               ║\n")
+		fmt.Printf("║ Transaction Count:    %-59d ║\n", balance.TransactionCount)
+		
+		if balance.LastActivity != nil {
+			fmt.Printf("║ Last Activity:        %-59s ║\n", 
+				balance.LastActivity.Format("2006-01-02 15:04:05 UTC"))
+		} else {
+			fmt.Printf("║ Last Activity:        %-59s ║\n", "No transactions found")
+		}
+		fmt.Printf("╚═══════════════════════════════════════════════════════════════════════════════╝\n")
+		
+		// Show recent transactions if any exist
+		if balance.TransactionCount > 0 {
+			fmt.Printf("\n")
+			fmt.Printf("╔═══════════════════════════════════════════════════════════════════════════════╗\n")
+			fmt.Printf("║                              RECENT TRANSACTIONS                              ║\n")
+			fmt.Printf("╚═══════════════════════════════════════════════════════════════════════════════╝\n")
+			
+			transactions, err := getWalletTransactions(address, 5)
+			if err != nil {
+				fmt.Printf("Error loading transactions: %v\n", err)
+			} else if len(transactions) > 0 {
+				fmt.Printf("\n%-16s %-12s %-19s %-20s %-10s\n", 
+					"HASH", "TYPE", "TIMESTAMP", "AMOUNT (SHADOW)", "BLOCK")
+				fmt.Printf("─────────────────────────────────────────────────────────────────────────────\n")
+				
+				for _, tx := range transactions {
+					hashShort := tx.TxHash
+					if len(hashShort) > 16 {
+						hashShort = hashShort[:16]
+					}
+					
+					amountShadow := float64(tx.Amount) / float64(SatoshisPerShadow)
+					amountStr := fmt.Sprintf("%+.8f", amountShadow)
+					
+					blockStr := ""
+					if tx.BlockHeight > 0 {
+						blockStr = fmt.Sprintf("#%d", tx.BlockHeight)
+					} else {
+						blockStr = "pending"
+					}
+					
+					fmt.Printf("%-16s %-12s %-19s %-20s %-10s\n",
+						hashShort, 
+						tx.Type, 
+						tx.Timestamp.Format("2006-01-02 15:04:05"),
+						amountStr,
+						blockStr)
+				}
+			}
+		}
+	},
+}
+
 var showCmd = &cobra.Command{
 	Use:   "show [wallet-name]",
-	Short: "Show details of a specific wallet",
+	Short: "Show details and balance of a specific wallet",
+	Long: `Show comprehensive wallet information including balance, transaction history, and account details.
+Scans the blockchain to calculate confirmed balance and recent transaction activity.`,
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		walletName := args[0]
@@ -202,13 +332,97 @@ var showCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		
-		fmt.Printf("Wallet Details:\n")
-		fmt.Printf("Name:        %s\n", wallet.Name)
-		fmt.Printf("Address:     %s\n", wallet.Address)
-		fmt.Printf("Public Key:  %s\n", wallet.PublicKey)
-		fmt.Printf("Identifier:  %s\n", wallet.Identifier)
-		fmt.Printf("Created:     %s\n", wallet.CreatedAt.Format("2006-01-02 15:04:05 UTC"))
-		fmt.Printf("Version:     %d\n", wallet.Version)
+		fmt.Printf("╔═══════════════════════════════════════════════════════════════════════════════╗\n")
+		fmt.Printf("║                                WALLET DETAILS                                 ║\n")
+		fmt.Printf("╠═══════════════════════════════════════════════════════════════════════════════╣\n")
+		fmt.Printf("║ Name:        %-64s ║\n", wallet.Name)
+		fmt.Printf("║ Address:     %-64s ║\n", wallet.Address)
+		fmt.Printf("║ Identifier:  %-64s ║\n", wallet.Identifier)
+		fmt.Printf("║ Created:     %-64s ║\n", wallet.CreatedAt.Format("2006-01-02 15:04:05 UTC"))
+		fmt.Printf("║ Version:     %-64d ║\n", wallet.Version)
+		fmt.Printf("╚═══════════════════════════════════════════════════════════════════════════════╝\n\n")
+		
+		// Calculate and display balance
+		fmt.Printf("Calculating balance... ")
+		balance, err := calculateWalletBalance(wallet.Address)
+		if err != nil {
+			fmt.Printf("Error calculating balance: %v\n", err)
+			// Continue without balance information
+			return
+		}
+		fmt.Printf("✓\n\n")
+		
+		fmt.Printf("╔═══════════════════════════════════════════════════════════════════════════════╗\n")
+		fmt.Printf("║                                BALANCE SUMMARY                                ║\n")
+		fmt.Printf("╠═══════════════════════════════════════════════════════════════════════════════╣\n")
+		fmt.Printf("║ Confirmed Balance:    %15.8f SHADOW (%20d satoshis) ║\n", 
+			balance.ConfirmedShadow, balance.ConfirmedBalance)
+		fmt.Printf("║ Pending Balance:      %15.8f SHADOW (%20d satoshis) ║\n", 
+			balance.PendingShadow, balance.PendingBalance)
+		fmt.Printf("║                                                                               ║\n")
+		fmt.Printf("║ Total Received:       %15.8f SHADOW (%20d satoshis) ║\n", 
+			balance.TotalReceivedShadow, balance.TotalReceived)
+		fmt.Printf("║ Total Sent:           %15.8f SHADOW (%20d satoshis) ║\n", 
+			balance.TotalSentShadow, balance.TotalSent)
+		fmt.Printf("║                                                                               ║\n")
+		fmt.Printf("║ Transaction Count:    %-59d ║\n", balance.TransactionCount)
+		
+		if balance.LastActivity != nil {
+			fmt.Printf("║ Last Activity:        %-59s ║\n", 
+				balance.LastActivity.Format("2006-01-02 15:04:05 UTC"))
+		} else {
+			fmt.Printf("║ Last Activity:        %-59s ║\n", "No transactions found")
+		}
+		fmt.Printf("╚═══════════════════════════════════════════════════════════════════════════════╝\n")
+		
+		// Show recent transactions if any exist
+		if balance.TransactionCount > 0 {
+			fmt.Printf("\n")
+			fmt.Printf("╔═══════════════════════════════════════════════════════════════════════════════╗\n")
+			fmt.Printf("║                              RECENT TRANSACTIONS                              ║\n")
+			fmt.Printf("╚═══════════════════════════════════════════════════════════════════════════════╝\n")
+			
+			transactions, err := getWalletTransactions(wallet.Address, 10)
+			if err != nil {
+				fmt.Printf("Error loading transactions: %v\n", err)
+			} else if len(transactions) == 0 {
+				fmt.Printf("No transactions found.\n")
+			} else {
+				fmt.Printf("\n%-16s %-12s %-19s %-20s %-10s\n", 
+					"HASH", "TYPE", "TIMESTAMP", "AMOUNT (SHADOW)", "BLOCK")
+				fmt.Printf("─────────────────────────────────────────────────────────────────────────────\n")
+				
+				for _, tx := range transactions {
+					hashShort := tx.TxHash
+					if len(hashShort) > 16 {
+						hashShort = hashShort[:16]
+					}
+					
+					amountShadow := float64(tx.Amount) / float64(SatoshisPerShadow)
+					amountStr := fmt.Sprintf("%+.8f", amountShadow)
+					
+					blockStr := ""
+					if tx.BlockHeight > 0 {
+						blockStr = fmt.Sprintf("#%d", tx.BlockHeight)
+					} else {
+						blockStr = "pending"
+					}
+					
+					fmt.Printf("%-16s %-12s %-19s %-20s %-10s\n",
+						hashShort, 
+						tx.Type, 
+						tx.Timestamp.Format("2006-01-02 15:04:05"),
+						amountStr,
+						blockStr)
+				}
+				
+				if len(transactions) == 10 {
+					fmt.Printf("\n(Showing last 10 transactions. Use 'shadowy tx history %s' for complete history)\n", wallet.Address)
+				}
+			}
+		}
+		
+		fmt.Printf("\n💡 Tip: Use 'shadowy tx send <amount> <to-address> %s' to send SHADOW from this wallet\n", wallet.Name)
 	},
 }
 
@@ -219,10 +433,14 @@ func init() {
 	walletCmd.AddCommand(fromKeyCmd)
 	walletCmd.AddCommand(listCmd)
 	walletCmd.AddCommand(showCmd)
+	walletCmd.AddCommand(balanceCmd)
 	
 	// Add wallet-dir flag to all wallet commands
 	walletCmd.PersistentFlags().StringVar(&walletDir, "wallet-dir", "", 
 		"Directory for wallet files (default: $HOME/.shadowy)")
+	
+	// Add data flag to balance command for blockchain directory override
+	balanceCmd.Flags().StringP("data", "d", "", "Override blockchain data directory")
 }
 
 // DeriveAddress creates a Shadowy address from a public key
@@ -357,6 +575,397 @@ func loadWallet(name string) (*WalletFile, error) {
 }
 
 func listWallets() ([]WalletFile, error) {
+	// First try to list existing wallets
+	wallets, err := listWalletsInternal()
+	if err != nil {
+		return nil, err
+	}
+	
+	// If no wallets exist, auto-generate a default one
+	if len(wallets) == 0 {
+		_, err := ensureDefaultWallet()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create default wallet: %w", err)
+		}
+		
+		// Re-list wallets after creation to get full details
+		wallets, err = listWalletsInternal()
+		if err != nil {
+			return nil, err
+		}
+	}
+	
+	// Load full wallet details for each wallet
+	var fullWallets []WalletFile
+	for _, wallet := range wallets {
+		fullWallet, err := loadWallet(wallet.Name)
+		if err != nil {
+			fmt.Printf("Warning: failed to load wallet '%s': %v\n", wallet.Name, err)
+			continue
+		}
+		fullWallets = append(fullWallets, *fullWallet)
+	}
+	
+	return fullWallets, nil
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// calculateWalletBalance scans the blockchain and mempool to calculate wallet balance
+func calculateWalletBalance(address string) (*WalletBalance, error) {
+	balance := &WalletBalance{
+		Address: address,
+	}
+	
+	// Load blockchain to scan for transactions
+	config, err := loadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+	
+	blockchain, err := NewBlockchain(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize blockchain: %w", err)
+	}
+	
+	// Get all blocks to scan
+	stats := blockchain.GetStats()
+	var lastActivity time.Time
+	
+	// Scan all blocks from genesis to tip
+	for height := uint64(0); height <= stats.TipHeight; height++ {
+		block, err := blockchain.GetBlockByHeight(height)
+		if err != nil {
+			continue // Skip missing blocks
+		}
+		
+		// Scan all transactions in the block
+		for _, signedTx := range block.Body.Transactions {
+			// Parse the transaction
+			var tx Transaction
+			if err := json.Unmarshal(signedTx.Transaction, &tx); err != nil {
+				continue // Skip invalid transactions
+			}
+			
+			txInvolvement := false
+			netAmount := int64(0)
+			
+			// Check outputs (received funds)
+			for _, output := range tx.Outputs {
+				if output.Address == address {
+					balance.TotalReceived += output.Value
+					balance.ConfirmedBalance += output.Value
+					netAmount += int64(output.Value)
+					txInvolvement = true
+				}
+			}
+			
+			// Check inputs (spent funds) - this is more complex as we need to look up previous outputs
+			// For now, we'll implement a simplified version that assumes inputs are from this address
+			// when the transaction is signed by this address's key
+			if len(tx.Inputs) > 0 {
+				// Simplified: if transaction has inputs and is not a coinbase, assume it's spending from this address
+				// This is a simplification - in a full implementation, we'd need to track UTXOs
+				if height > 0 { // Skip genesis block coinbase
+					// Check if this transaction was signed by our wallet
+					// For now, we'll use a heuristic: if we received outputs in previous blocks
+					// and this transaction has inputs, it might be spending our funds
+					if signedTx.SignerKey != "" && len(tx.Inputs) > 0 {
+						// Try to estimate spent amount by looking at total outputs to other addresses
+						totalOut := uint64(0)
+						for _, output := range tx.Outputs {
+							if output.Address != address {
+								totalOut += output.Value
+							}
+						}
+						if totalOut > 0 && balance.TotalReceived > 0 {
+							// This is a heuristic - in reality we'd need full UTXO tracking
+							spentAmount := totalOut
+							if spentAmount <= balance.ConfirmedBalance {
+								balance.TotalSent += spentAmount
+								balance.ConfirmedBalance -= spentAmount
+								netAmount -= int64(spentAmount)
+								txInvolvement = true
+							}
+						}
+					}
+				}
+			}
+			
+			if txInvolvement {
+				balance.TransactionCount++
+				if tx.Timestamp.After(lastActivity) {
+					lastActivity = tx.Timestamp
+				}
+			}
+		}
+	}
+	
+	// Set last activity if we found any
+	if !lastActivity.IsZero() {
+		balance.LastActivity = &lastActivity
+	}
+	
+	// TODO: Scan mempool for pending transactions
+	// For now, pending balance equals confirmed balance
+	balance.PendingBalance = balance.ConfirmedBalance
+	
+	// Calculate human-readable amounts
+	balance.ConfirmedShadow = float64(balance.ConfirmedBalance) / float64(SatoshisPerShadow)
+	balance.PendingShadow = float64(balance.PendingBalance) / float64(SatoshisPerShadow)
+	balance.TotalReceivedShadow = float64(balance.TotalReceived) / float64(SatoshisPerShadow)
+	balance.TotalSentShadow = float64(balance.TotalSent) / float64(SatoshisPerShadow)
+	
+	return balance, nil
+}
+
+// calculateWalletBalanceWithDir scans the blockchain with optional directory override
+func calculateWalletBalanceWithDir(address string, blockchainDir string) (*WalletBalance, error) {
+	balance := &WalletBalance{
+		Address: address,
+	}
+	
+	// Load blockchain configuration  
+	config, err := loadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+	
+	// Override blockchain directory if specified
+	if blockchainDir != "" {
+		config.BlockchainDirectory = blockchainDir
+	}
+	
+	blockchain, err := NewBlockchain(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize blockchain: %w", err)
+	}
+	
+	// Get all blocks to scan
+	stats := blockchain.GetStats()
+	var lastActivity time.Time
+	
+	// Scan all blocks from genesis to tip
+	for height := uint64(0); height <= stats.TipHeight; height++ {
+		block, err := blockchain.GetBlockByHeight(height)
+		if err != nil {
+			// Skip missing blocks
+			continue
+		}
+		
+		// Scan all transactions in this block
+		for _, signedTx := range block.Body.Transactions {
+			// Parse the transaction
+			var tx Transaction
+			if err := json.Unmarshal(signedTx.Transaction, &tx); err != nil {
+				continue // Skip invalid transactions
+			}
+			
+			txInvolvement := false
+			
+			// Check outputs (received funds)
+			for _, output := range tx.Outputs {
+				if output.Address == address {
+					balance.TotalReceived += output.Value
+					balance.ConfirmedBalance += output.Value
+					txInvolvement = true
+				}
+			}
+			
+			// Check inputs (spent funds) - simplified implementation
+			if len(tx.Inputs) > 0 && height > 0 { // Skip genesis block coinbase
+				// This is a simplified version - in a full implementation,
+				// we'd need to track UTXOs properly
+				for _, output := range tx.Outputs {
+					if output.Address != address {
+						// This is likely spending from our address
+						// (very simplified assumption)
+					}
+				}
+			}
+			
+			if txInvolvement {
+				balance.TransactionCount++
+				if tx.Timestamp.After(lastActivity) {
+					lastActivity = tx.Timestamp
+				}
+			}
+		}
+	}
+	
+	// Set last activity if we found any
+	if !lastActivity.IsZero() {
+		balance.LastActivity = &lastActivity
+	}
+	
+	// TODO: Scan mempool for pending transactions
+	// For now, pending balance equals confirmed balance
+	balance.PendingBalance = balance.ConfirmedBalance
+	
+	// Calculate human-readable amounts
+	balance.ConfirmedShadow = float64(balance.ConfirmedBalance) / float64(SatoshisPerShadow)
+	balance.PendingShadow = float64(balance.PendingBalance) / float64(SatoshisPerShadow)
+	balance.TotalReceivedShadow = float64(balance.TotalReceived) / float64(SatoshisPerShadow)
+	balance.TotalSentShadow = float64(balance.TotalSent) / float64(SatoshisPerShadow)
+	
+	return balance, nil
+}
+
+// getWalletTransactions returns a list of transactions involving the wallet
+func getWalletTransactions(address string, limit int) ([]TransactionReference, error) {
+	var transactions []TransactionReference
+	
+	// Load blockchain to scan for transactions
+	config, err := loadConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
+	}
+	
+	blockchain, err := NewBlockchain(config)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize blockchain: %w", err)
+	}
+	
+	stats := blockchain.GetStats()
+	
+	// Scan blocks from newest to oldest
+	for height := stats.TipHeight; height >= 0 && len(transactions) < limit; height-- {
+		block, err := blockchain.GetBlockByHeight(height)
+		if err != nil {
+			continue
+		}
+		
+		// Scan transactions in reverse order (newest first)
+		for i := len(block.Body.Transactions) - 1; i >= 0 && len(transactions) < limit; i-- {
+			signedTx := block.Body.Transactions[i]
+			
+			var tx Transaction
+			if err := json.Unmarshal(signedTx.Transaction, &tx); err != nil {
+				continue
+			}
+			
+			// Check if transaction involves this address
+			netAmount := int64(0)
+			txType := ""
+			
+			// Check outputs (received)
+			for _, output := range tx.Outputs {
+				if output.Address == address {
+					netAmount += int64(output.Value)
+					if height == 0 || (len(tx.Inputs) == 0) {
+						txType = "coinbase"
+					} else {
+						txType = "received"
+					}
+				}
+			}
+			
+			// Check if this was a send transaction (simplified)
+			if len(tx.Inputs) > 0 && height > 0 {
+				// This is a simplification - we'd need full UTXO tracking for accuracy
+				totalOut := uint64(0)
+				hasOtherOutputs := false
+				for _, output := range tx.Outputs {
+					if output.Address != address {
+						totalOut += output.Value
+						hasOtherOutputs = true
+					}
+				}
+				
+				if hasOtherOutputs && netAmount <= 0 {
+					// Likely a send transaction
+					netAmount = -int64(totalOut)
+					txType = "sent"
+				}
+			}
+			
+			if netAmount != 0 {
+				transactions = append(transactions, TransactionReference{
+					TxHash:      signedTx.TxHash,
+					BlockHeight: height,
+					Timestamp:   tx.Timestamp,
+					Amount:      netAmount,
+					Type:        txType,
+					Confirmed:   true,
+				})
+			}
+		}
+		
+		if height == 0 {
+			break // Avoid underflow
+		}
+	}
+	
+	return transactions, nil
+}
+
+// ensureDefaultWallet ensures a default wallet exists, creating one if necessary
+func ensureDefaultWallet() (*WalletFile, error) {
+	// Try to get existing wallets (without triggering auto-creation to avoid recursion)
+	wallets, err := listWalletsInternal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to list wallets: %w", err)
+	}
+
+	// If we have wallets, use the first one
+	if len(wallets) > 0 {
+		wallet, err := loadWallet(wallets[0].Name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load existing wallet %s: %w", wallets[0].Name, err)
+		}
+		return wallet, nil
+	}
+
+	// No wallets exist, create a default one
+	fmt.Println("📝 No wallets found. Creating default wallet...")
+	
+	// Ensure wallet directory exists
+	if err := ensureWalletDir(); err != nil {
+		return nil, fmt.Errorf("failed to create wallet directory: %w", err)
+	}
+
+	// Generate new wallet
+	keyPair, err := GenerateKeyPair()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate key pair: %w", err)
+	}
+
+	address := DeriveAddress(keyPair.PublicKey[:])
+	
+	wallet := WalletFile{
+		Name:       "default",
+		Address:    address,
+		PrivateKey: keyPair.PrivateKeyHex(),
+		PublicKey:  keyPair.PublicKeyHex(),
+		Identifier: keyPair.IdentifierHex(),
+		CreatedAt:  time.Now().UTC(),
+		Version:    1,
+	}
+
+	walletPath, err := saveWallet(wallet)
+	if err != nil {
+		return nil, fmt.Errorf("failed to save default wallet: %w", err)
+	}
+
+	fmt.Printf("✅ Created default wallet: %s\n", wallet.Name)
+	fmt.Printf("📍 Wallet address: %s\n", wallet.Address)
+	fmt.Printf("💾 Saved to: %s\n", walletPath)
+	
+	return &wallet, nil
+}
+
+// listWalletsInternal lists wallets without auto-generation (internal use only)
+func listWalletsInternal() ([]WalletFile, error) {
 	walletDirPath := getWalletDir()
 	
 	// Check if directory exists
@@ -371,28 +980,24 @@ func listWallets() ([]WalletFile, error) {
 	
 	var wallets []WalletFile
 	for _, file := range files {
-		if !file.IsDir() && filepath.Ext(file.Name()) == WalletFileExt {
-			name := file.Name()[:len(file.Name())-len(WalletFileExt)]
-			wallet, err := loadWallet(name)
+		if !file.IsDir() && strings.HasSuffix(file.Name(), WalletFileExt) {
+			name := strings.TrimSuffix(file.Name(), WalletFileExt)
+			info, err := file.Info()
 			if err != nil {
-				fmt.Printf("Warning: failed to load wallet '%s': %v\n", name, err)
 				continue
 			}
-			wallets = append(wallets, *wallet)
+			
+			wallets = append(wallets, WalletFile{
+				Name:      name,
+				CreatedAt: info.ModTime(),
+			})
 		}
 	}
 	
+	// Sort by creation time (newest first)
+	sort.Slice(wallets, func(i, j int) bool {
+		return wallets[i].CreatedAt.After(wallets[j].CreatedAt)
+	})
+	
 	return wallets, nil
-}
-
-func bytesEqual(a, b []byte) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
