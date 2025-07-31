@@ -334,12 +334,6 @@ func (ce *ConsensusEngine) handleMempoolResponse(peer *Peer, message *P2PMessage
 
 // processIncomingBlock processes a block received from a peer with ordering
 func (ce *ConsensusEngine) processIncomingBlock(block *Block) {
-    // Check if we already have this block
-    if _, err := ce.blockchain.GetBlock(block.Hash()); err == nil {
-        log.Printf("Block %d already exists, skipping", block.Header.Height)
-        return
-    }
-
     ce.syncMutex.Lock()
     defer ce.syncMutex.Unlock()
 
@@ -566,6 +560,8 @@ func (ce *ConsensusEngine) broadcastMessage(message *P2PMessage) {
         }
     }
     ce.peersMutex.RUnlock()
+
+    log.Printf("Broadcasting %s to %d connected peers", message.Type, len(peers))
 
     for _, peer := range peers {
         go func(p *Peer) {

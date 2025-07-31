@@ -21,7 +21,7 @@ var (
 	// AllowFork when true, allows creating new testnet genesis blocks instead of bootstrapping
 	AllowFork = false
 	// TrackerURL is the URL of the tracker service for bootstrapping
-	TrackerURL = "http://boobies.local:8090"
+	TrackerURL = "https://playatarot.com"
 )
 
 // Block represents a single block in the blockchain
@@ -74,6 +74,13 @@ type Blockchain struct {
 	tipHash      string             // hash of the latest block
 	tipHeight    uint64             // height of the latest block
 	
+	// Token system
+	tokenState    *TokenState
+	tokenExecutor *TokenExecutor
+	
+	// Syndicate system
+	syndicateManager *SyndicateManager
+	
 	// Synchronization
 	mu sync.RWMutex
 	
@@ -111,6 +118,21 @@ func NewBlockchain(config *ShadowConfig) (*Blockchain, error) {
 	if err := os.MkdirAll(bc.dataDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create blockchain directory: %w", err)
 	}
+	
+	// Initialize token system
+	tokenDataDir := filepath.Join(bc.dataDir, "tokens")
+	tokenState, err := NewTokenState(tokenDataDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize token state: %w", err)
+	}
+	bc.tokenState = tokenState
+	
+	// Initialize syndicate system
+	bc.syndicateManager = NewSyndicateManager()
+	log.Printf("🐉 [BLOCKCHAIN] Syndicate system initialized")
+	
+	// Initialize token executor with syndicate manager
+	bc.tokenExecutor = NewTokenExecutor(tokenState, bc.syndicateManager)
 	
 	// Load existing blockchain or create genesis
 	if err := bc.initialize(); err != nil {
@@ -409,6 +431,76 @@ func (bc *Blockchain) AddBlock(block *Block) error {
 	validationDuration := time.Since(validationStart)
 	log.Printf("✅ [BLOCKCHAIN] Block validation PASSED in %v", validationDuration)
 	
+	// Execute token operations in all transactions
+	log.Printf("🪙 [BLOCKCHAIN] Processing token operations...")
+	tokenExecStart := time.Now()
+	totalShadowLocked := uint64(0)
+	totalShadowReleased := uint64(0)
+	tokenOpsProcessed := 0
+	
+	log.Printf("🔍 [BLOCKCHAIN] Starting validation of %d transactions", len(block.Body.Transactions))
+	for i, signedTx := range block.Body.Transactions {
+		log.Printf("🔍 [BLOCKCHAIN] Processing transaction %d/%d", i+1, len(block.Body.Transactions))
+		
+		// Parse the transaction
+		var tx Transaction
+		if err := json.Unmarshal(signedTx.Transaction, &tx); err != nil {
+			log.Printf("❌ [BLOCKCHAIN] Failed to parse transaction %d: %v", i, err)
+			return fmt.Errorf("failed to parse transaction %d: %w", i, err)
+		}
+		
+		log.Printf("🔍 [BLOCKCHAIN] Transaction %d has %d token operations", i, len(tx.TokenOps))
+		
+		// Execute token operations if any exist
+		if len(tx.TokenOps) > 0 {
+			log.Printf("🔍 [BLOCKCHAIN] Executing token operations for transaction %d", i)
+			for j, op := range tx.TokenOps {
+				log.Printf("🔍 [BLOCKCHAIN] Token op %d: type=%d, tokenID=%s", j, op.Type, op.TokenID)
+			}
+			
+			result, err := bc.tokenExecutor.ExecuteTokenOperations(&tx)
+			if err != nil {
+				log.Printf("❌ [BLOCKCHAIN] Token execution failed for transaction %d: %v", i, err)
+				return fmt.Errorf("token execution failed for transaction %d: %w", i, err)
+			}
+			log.Printf("✅ [BLOCKCHAIN] Token execution succeeded for transaction %d", i)
+			
+			totalShadowLocked += result.ShadowLocked
+			totalShadowReleased += result.ShadowReleased
+			tokenOpsProcessed += len(result.Operations)
+			
+			log.Printf("🪙 [BLOCKCHAIN] Transaction %d: %d token operations executed", i, len(result.Operations))
+		}
+	}
+	
+	tokenExecDuration := time.Since(tokenExecStart)
+	if tokenOpsProcessed > 0 {
+		log.Printf("✅ [BLOCKCHAIN] Token processing COMPLETED in %v", tokenExecDuration)
+		log.Printf("   🪙 Operations: %d", tokenOpsProcessed)
+		log.Printf("   🔒 Shadow locked: %d", totalShadowLocked)
+		log.Printf("   🔓 Shadow released: %d", totalShadowReleased)
+	} else {
+		log.Printf("⚪ [BLOCKCHAIN] No token operations to process")
+	}
+	
+	// Track syndicate performance for this block
+	if bc.syndicateManager != nil {
+		log.Printf("🐉 [BLOCKCHAIN] Tracking syndicate performance for block...")
+		farmerAddress := block.Header.FarmerAddress
+		
+		// Determine which syndicate won this block (if any)
+		winnerSyndicate := bc.determineSyndicateWinner(farmerAddress)
+		
+		// Update syndicate manager with block win information
+		bc.syndicateManager.UpdateBlockWin(block.Header.Height, winnerSyndicate, farmerAddress)
+		
+		if winnerSyndicate >= SyndicateSeiryu && winnerSyndicate <= SyndicateGenbu {
+			log.Printf("🐉 [BLOCKCHAIN] Block won by %s (farmer: %s)", winnerSyndicate.Description(), farmerAddress)
+		} else {
+			log.Printf("🐉 [BLOCKCHAIN] Block won by solo miner (farmer: %s)", farmerAddress)
+		}
+	}
+	
 	// Check if this is a new tip
 	isNewTip := block.Header.Height > bc.tipHeight
 	prevTipHeight := bc.tipHeight
@@ -487,6 +579,37 @@ func (bc *Blockchain) validateBlock(block *Block) error {
 	if uint32(len(block.Body.Transactions)) != block.Body.TxCount {
 		return fmt.Errorf("transaction count mismatch: expected %d, got %d", 
 			len(block.Body.Transactions), block.Body.TxCount)
+	}
+	
+	// Validate token operations in all transactions
+	log.Printf("🔍 [BLOCKCHAIN] Starting token operation validation for %d transactions", len(block.Body.Transactions))
+	for i, signedTx := range block.Body.Transactions {
+		log.Printf("🔍 [BLOCKCHAIN] Validating token operations in transaction %d", i)
+		
+		// Parse the transaction
+		var tx Transaction
+		if err := json.Unmarshal(signedTx.Transaction, &tx); err != nil {
+			log.Printf("❌ [BLOCKCHAIN] Failed to parse transaction %d for validation: %v", i, err)
+			return fmt.Errorf("failed to parse transaction %d: %w", i, err)
+		}
+		
+		log.Printf("🔍 [BLOCKCHAIN] Transaction %d has %d token operations", i, len(tx.TokenOps))
+		
+		// Validate basic token operation structure
+		if err := tx.ValidateTokenOperations(); err != nil {
+			log.Printf("❌ [BLOCKCHAIN] Transaction %d has invalid token operation structure: %v", i, err)
+			return fmt.Errorf("transaction %d has invalid token operations: %w", i, err)
+		}
+		
+		// Validate token operations can be executed (check state consistency)
+		if len(tx.TokenOps) > 0 {
+			log.Printf("🔍 [BLOCKCHAIN] Validating token operation execution for transaction %d", i)
+			if err := bc.tokenExecutor.ValidateTokenOperationExecution(&tx); err != nil {
+				log.Printf("❌ [BLOCKCHAIN] Transaction %d token operations cannot be executed: %v", i, err)
+				return fmt.Errorf("transaction %d token operations cannot be executed: %w", i, err)
+			}
+			log.Printf("✅ [BLOCKCHAIN] Token operation validation passed for transaction %d", i)
+		}
 	}
 	
 	// TODO: Add more validation (proof-of-storage validation, etc.)
@@ -874,4 +997,53 @@ func (bc *Blockchain) addBlockWithoutBroadcast(block *Block) error {
 	}
 	
 	return nil
+}
+
+// GetTokenState returns the token state manager
+func (bc *Blockchain) GetTokenState() *TokenState {
+	return bc.tokenState
+}
+
+// GetTokenExecutor returns the token executor
+func (bc *Blockchain) GetTokenExecutor() *TokenExecutor {
+	return bc.tokenExecutor
+}
+
+// GetSyndicateManager returns the syndicate manager
+func (bc *Blockchain) GetSyndicateManager() *SyndicateManager {
+	return bc.syndicateManager
+}
+
+// determineSyndicateWinner determines which syndicate a farmer belongs to based on their active NFTs
+func (bc *Blockchain) determineSyndicateWinner(farmerAddress string) SyndicateType {
+	// Default to -1 (solo miner) if no syndicate membership found
+	const soloMiner SyndicateType = -1
+	
+	// Get all token balances for the farmer
+	balances, err := bc.tokenState.GetAllTokenBalances(farmerAddress)
+	if err != nil {
+		log.Printf("⚠️ [BLOCKCHAIN] Failed to get farmer token balances: %v", err)
+		return soloMiner
+	}
+	
+	// Look for active syndicate membership NFTs
+	for _, balance := range balances {
+		if balance.Balance > 0 && balance.TokenInfo != nil && balance.TokenInfo.Syndicate != nil {
+			syndicateData := balance.TokenInfo.Syndicate
+			
+			// Check if this syndicate NFT is still active (not expired)
+			currentTime := time.Now().Unix()
+			if syndicateData.ExpirationTime > currentTime {
+				log.Printf("🐉 [BLOCKCHAIN] Found active syndicate membership: %s for %s", 
+					syndicateData.Syndicate.String(), farmerAddress)
+				return syndicateData.Syndicate
+			} else {
+				log.Printf("🐉 [BLOCKCHAIN] Found expired syndicate membership: %s for %s", 
+					syndicateData.Syndicate.String(), farmerAddress)
+			}
+		}
+	}
+	
+	// No active syndicate membership found
+	return soloMiner
 }

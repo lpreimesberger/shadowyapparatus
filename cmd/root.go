@@ -26,7 +26,7 @@ func init() {
 	// Add persistent flags
 	rootCmd.PersistentFlags().BoolVar(&AllowFork, "fork", false,
 		"Allow creating new testnet genesis blocks instead of bootstrapping from network")
-	rootCmd.PersistentFlags().StringVar(&TrackerURL, "tracker-url", "http://boobies.local:8090",
+	rootCmd.PersistentFlags().StringVar(&TrackerURL, "tracker-url", "https://playatarot.com",
 		"URL of the tracker service for bootstrapping genesis blocks")
 	
 	rootCmd.AddCommand(plotCmd)

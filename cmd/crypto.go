@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"unsafe"
 
 	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 	"golang.org/x/crypto/sha3"
@@ -60,6 +59,43 @@ func NewKeyPairFromSeed(seed [SeedSize]byte) (*KeyPair, error) {
 	kp.Address = generateAddress(pubKeyBytes)
 	kp.Identifier = generateIdentifier(kp.PublicKey[:])
 	
+	return kp, nil
+}
+
+// NewKeyPairFromPrivateKey reconstructs a key pair from a full private key.
+// This is used for legacy wallets that stored the full private key instead of just the seed.
+func NewKeyPairFromPrivateKey(privKeyBytes [PrivateKeySize]byte) (*KeyPair, error) {
+	// Reconstruct the private key object from its byte representation using proper unmarshaling
+	var privKey mldsa87.PrivateKey
+	if err := privKey.UnmarshalBinary(privKeyBytes[:]); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal private key: %w", err)
+	}
+
+	// Get the public key from the private key
+	pubKey := privKey.Public().(*mldsa87.PublicKey)
+	
+	// Get the bytes for both keys
+	privKeyBytesActual := privKey.Bytes()
+	pubKeyBytes, err := pubKey.MarshalBinary()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal public key: %w", err)
+	}
+
+	// The seed is the first part of the private key data
+	seed := privKeyBytesActual[:mldsa87.SeedSize]
+
+	// Create the KeyPair struct
+	kp := &KeyPair{}
+
+	// Copy the seed, private key, and public key to the KeyPair struct.
+	copy(kp.Seed[:], seed)
+	copy(kp.PrivateKey[:], privKeyBytesActual)
+	copy(kp.PublicKey[:], pubKeyBytes)
+
+	// Generate the address and identifier from the public key.
+	kp.Address = generateAddress(pubKeyBytes)
+	kp.Identifier = generateIdentifier(kp.PublicKey[:])
+
 	return kp, nil
 }
 
@@ -140,8 +176,12 @@ func VerifySignature(pubKeyBytes, message, signature []byte) bool {
 		return false
 	}
 	
-	pubKey := (*mldsa87.PublicKey)(unsafe.Pointer(&pubKeyBytes[0]))
-	return mldsa87.Verify(pubKey, message, nil, signature)
+	var pubKey mldsa87.PublicKey
+	if err := pubKey.UnmarshalBinary(pubKeyBytes); err != nil {
+		return false
+	}
+	
+	return mldsa87.Verify(&pubKey, message, nil, signature)
 }
 
 func FindClosestMatch(target [IdentifierSize]byte, identifiers [][IdentifierSize]byte) int {

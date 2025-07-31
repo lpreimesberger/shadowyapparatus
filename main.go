@@ -1,6 +1,10 @@
 package main
 
-import "shadowy/cmd"
+import (
+	"shadowyapparatus/cmd"
+)
+
+// global
 
 func main() {
 	cmd.Execute()

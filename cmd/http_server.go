@@ -99,18 +99,41 @@ func (sn *ShadowNode) initializeHTTPServer() error {
 	utils.HandleFunc("/transaction/create", sn.handleCreateTransaction).Methods("POST")
 	utils.HandleFunc("/transaction/sign", sn.handleSignTransaction).Methods("POST")
 
+	// Token endpoints
+	tokens := v1.PathPrefix("/tokens").Subrouter()
+	tokens.HandleFunc("", sn.handleListTokens).Methods("GET")
+	tokens.HandleFunc("/{token_id}", sn.handleGetToken).Methods("GET")
+	tokens.HandleFunc("/{token_id}/holders", sn.handleGetTokenHolders).Methods("GET")
+	tokens.HandleFunc("/{token_id}/supply", sn.handleGetTokenSupply).Methods("GET")
+	tokens.HandleFunc("/balances/{address}", sn.handleGetTokenBalances).Methods("GET")
+	tokens.HandleFunc("/{token_id}/balance/{address}", sn.handleGetTokenBalance).Methods("GET")
+
 	// Web Wallet Interface
 	webwallet := router.PathPrefix("/wallet").Subrouter()
 	webwallet.HandleFunc("/", sn.handleWebWallet).Methods("GET")
 	webwallet.HandleFunc("/login", sn.handleWebWalletLogin).Methods("POST")
 	webwallet.HandleFunc("/logout", sn.handleWebWalletLogout).Methods("POST")
 	webwallet.HandleFunc("/balance", sn.handleWebWalletBalance).Methods("GET")
-	webwallet.HandleFunc("/request", sn.handleWebWalletRequest).Methods("POST")
 	webwallet.HandleFunc("/send", sn.handleWebWalletSend).Methods("POST")
 	webwallet.HandleFunc("/send_raw", sn.handleWebWalletSendRaw).Methods("POST")
 	webwallet.HandleFunc("/transactions", sn.handleWebWalletTransactions).Methods("GET")
 	webwallet.HandleFunc("/mempool", sn.handleWebWalletMempool).Methods("GET")
 	webwallet.HandleFunc("/peers", sn.handleWebWalletPeers).Methods("GET")
+	webwallet.HandleFunc("/tokens", sn.handleWebWalletTokens).Methods("GET")
+	webwallet.HandleFunc("/create_token", sn.handleWebWalletCreateToken).Methods("POST")
+	webwallet.HandleFunc("/approve_token", sn.handleWebWalletApproveToken).Methods("POST")
+	webwallet.HandleFunc("/melt_token", sn.handleWebWalletMeltToken).Methods("POST")
+	
+	// Syndicate endpoints
+	webwallet.HandleFunc("/syndicate-membership", sn.handleWebWalletSyndicateMembership).Methods("GET")
+	webwallet.HandleFunc("/syndicate-stats", sn.handleWebWalletSyndicateStats).Methods("GET")
+	webwallet.HandleFunc("/join-syndicate", sn.handleWebWalletJoinSyndicate).Methods("POST")
+	
+	// Marketplace endpoints
+	marketplace := router.PathPrefix("/api/marketplace").Subrouter()
+	marketplace.HandleFunc("/offers", sn.handleMarketplaceOffers).Methods("GET")
+	marketplace.HandleFunc("/create-offer", sn.handleMarketplaceCreateOffer).Methods("POST")
+	marketplace.HandleFunc("/purchase", sn.handleMarketplacePurchase).Methods("POST")
 
 	// Add CORS middleware
 	router.Use(corsMiddleware)
@@ -497,9 +520,10 @@ func (sn *ShadowNode) handleValidateAddress(w http.ResponseWriter, r *http.Reque
 // Create transaction endpoint
 func (sn *ShadowNode) handleCreateTransaction(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		Inputs   []TransactionInput  `json:"inputs"`
-		Outputs  []TransactionOutput `json:"outputs"`
-		NotUntil *time.Time          `json:"not_until,omitempty"`
+		Inputs    []TransactionInput  `json:"inputs"`
+		Outputs   []TransactionOutput `json:"outputs"`
+		TokenOps  []TokenOperation    `json:"token_ops,omitempty"`
+		NotUntil  *time.Time          `json:"not_until,omitempty"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -512,6 +536,7 @@ func (sn *ShadowNode) handleCreateTransaction(w http.ResponseWriter, r *http.Req
 		Version:   1,
 		Inputs:    request.Inputs,
 		Outputs:   request.Outputs,
+		TokenOps:  request.TokenOps,
 		Timestamp: time.Now().UTC(),
 		Nonce:     uint64(time.Now().UnixNano()),
 	}
@@ -1127,5 +1152,466 @@ func (sn *ShadowNode) handleSetMiningAddress(w http.ResponseWriter, r *http.Requ
 		"message":        "Mining address updated",
 	}
 
+	json.NewEncoder(w).Encode(response)
+}
+
+// Token API handlers
+
+// List all tokens endpoint
+func (sn *ShadowNode) handleListTokens(w http.ResponseWriter, r *http.Request) {
+	if sn.blockchain == nil {
+		http.Error(w, "Blockchain not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	tokenState := sn.blockchain.GetTokenState()
+	tokens := tokenState.ListAllTokens()
+
+	// Create response with additional information
+	tokenList := make([]map[string]interface{}, 0, len(tokens))
+	for tokenID, metadata := range tokens {
+		// Get current supply
+		supply, _ := tokenState.GetTotalSupply(tokenID)
+		lockedShadow, _ := tokenState.GetLockedShadow(tokenID)
+
+		tokenInfo := map[string]interface{}{
+			"token_id":      tokenID,
+			"name":          metadata.Name,
+			"ticker":        metadata.Ticker,
+			"total_supply":  metadata.TotalSupply,
+			"current_supply": supply,
+			"decimals":      metadata.Decimals,
+			"lock_amount":   metadata.LockAmount,
+			"creator":       metadata.Creator,
+			"creation_time": metadata.CreationTime,
+			"locked_shadow": lockedShadow,
+		}
+		tokenList = append(tokenList, tokenInfo)
+	}
+
+	response := map[string]interface{}{
+		"tokens": tokenList,
+		"count":  len(tokenList),
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// Get token info endpoint
+func (sn *ShadowNode) handleGetToken(w http.ResponseWriter, r *http.Request) {
+	if sn.blockchain == nil {
+		http.Error(w, "Blockchain not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	vars := mux.Vars(r)
+	tokenID := vars["token_id"]
+
+	tokenState := sn.blockchain.GetTokenState()
+	
+	// Get token metadata
+	metadata, err := tokenState.GetTokenInfo(tokenID)
+	if err != nil {
+		http.Error(w, "Token not found", http.StatusNotFound)
+		return
+	}
+
+	// Get additional information
+	supply, _ := tokenState.GetTotalSupply(tokenID)
+	lockedShadow, _ := tokenState.GetLockedShadow(tokenID)
+	holders, _ := tokenState.GetTokenHolders(tokenID)
+
+	response := map[string]interface{}{
+		"token_id":       tokenID,
+		"name":           metadata.Name,
+		"ticker":         metadata.Ticker,
+		"total_supply":   metadata.TotalSupply,
+		"current_supply": supply,
+		"decimals":       metadata.Decimals,
+		"lock_amount":    metadata.LockAmount,
+		"creator":        metadata.Creator,
+		"creation_time":  metadata.CreationTime,
+		"locked_shadow":  lockedShadow,
+		"holder_count":   len(holders),
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// Get token holders endpoint
+func (sn *ShadowNode) handleGetTokenHolders(w http.ResponseWriter, r *http.Request) {
+	if sn.blockchain == nil {
+		http.Error(w, "Blockchain not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	vars := mux.Vars(r)
+	tokenID := vars["token_id"]
+
+	tokenState := sn.blockchain.GetTokenState()
+	
+	// Get token holders
+	holders, err := tokenState.GetTokenHolders(tokenID)
+	if err != nil {
+		http.Error(w, "Token not found", http.StatusNotFound)
+		return
+	}
+
+	// Convert to response format
+	holderList := make([]map[string]interface{}, 0, len(holders))
+	for address, balance := range holders {
+		holderList = append(holderList, map[string]interface{}{
+			"address": address,
+			"balance": balance,
+		})
+	}
+
+	response := map[string]interface{}{
+		"token_id": tokenID,
+		"holders":  holderList,
+		"count":    len(holderList),
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// Get token supply endpoint
+func (sn *ShadowNode) handleGetTokenSupply(w http.ResponseWriter, r *http.Request) {
+	if sn.blockchain == nil {
+		http.Error(w, "Blockchain not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	vars := mux.Vars(r)
+	tokenID := vars["token_id"]
+
+	tokenState := sn.blockchain.GetTokenState()
+	
+	// Get token info
+	metadata, err := tokenState.GetTokenInfo(tokenID)
+	if err != nil {
+		http.Error(w, "Token not found", http.StatusNotFound)
+		return
+	}
+
+	// Get supply information
+	currentSupply, _ := tokenState.GetTotalSupply(tokenID)
+	lockedShadow, _ := tokenState.GetLockedShadow(tokenID)
+
+	response := map[string]interface{}{
+		"token_id":         tokenID,
+		"total_supply":     metadata.TotalSupply,
+		"current_supply":   currentSupply,
+		"burned_tokens":    metadata.TotalSupply - currentSupply,
+		"locked_shadow":    lockedShadow,
+		"shadow_per_token": metadata.LockAmount,
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// Get token balances for address endpoint
+func (sn *ShadowNode) handleGetTokenBalances(w http.ResponseWriter, r *http.Request) {
+	if sn.blockchain == nil {
+		http.Error(w, "Blockchain not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	vars := mux.Vars(r)
+	address := vars["address"]
+
+	// Validate address format
+	if !IsValidAddress(address) {
+		http.Error(w, "Invalid address format", http.StatusBadRequest)
+		return
+	}
+
+	tokenState := sn.blockchain.GetTokenState()
+	
+	// Get all token balances for this address
+	balances, err := tokenState.GetAllTokenBalances(address)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get token balances: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]interface{}{
+		"address":  address,
+		"balances": balances,
+		"count":    len(balances),
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// Get specific token balance for address endpoint
+func (sn *ShadowNode) handleGetTokenBalance(w http.ResponseWriter, r *http.Request) {
+	if sn.blockchain == nil {
+		http.Error(w, "Blockchain not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	vars := mux.Vars(r)
+	tokenID := vars["token_id"]
+	address := vars["address"]
+
+	// Validate address format
+	if !IsValidAddress(address) {
+		http.Error(w, "Invalid address format", http.StatusBadRequest)
+		return
+	}
+
+	tokenState := sn.blockchain.GetTokenState()
+	
+	// Get token balance
+	balance, err := tokenState.GetTokenBalance(tokenID, address)
+	if err != nil {
+		http.Error(w, "Token not found", http.StatusNotFound)
+		return
+	}
+
+	// Get token metadata for additional context
+	metadata, err := tokenState.GetTokenInfo(tokenID)
+	if err != nil {
+		http.Error(w, "Token not found", http.StatusNotFound)
+		return
+	}
+
+	response := map[string]interface{}{
+		"token_id": tokenID,
+		"address":  address,
+		"balance":  balance,
+		"token_info": map[string]interface{}{
+			"name":         metadata.Name,
+			"ticker":       metadata.Ticker,
+			"decimals":     metadata.Decimals,
+			"lock_amount":  metadata.LockAmount,
+		},
+	}
+
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleMarketplaceOffers returns all active trade offers
+func (sn *ShadowNode) handleMarketplaceOffers(w http.ResponseWriter, r *http.Request) {
+	// Check blockchain availability
+	if sn.blockchain == nil {
+		http.Error(w, "Blockchain not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get token state
+	tokenState := sn.blockchain.GetTokenState()
+	if tokenState == nil {
+		http.Error(w, "Token state not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get all tokens and filter for trade offer NFTs
+	tokens := tokenState.GetAllTokens()
+	var offers []map[string]interface{}
+
+	for tokenID, metadata := range tokens {
+		// Check if this is a trade offer NFT
+		if metadata.TradeOffer != nil {
+			// Get current owner (should be the seller)
+			balances := tokenState.GetTokenBalances(tokenID)
+			
+			// Find who currently owns this NFT
+			var currentOwner string
+			for address, balance := range balances {
+				if balance > 0 {
+					currentOwner = address
+					break
+				}
+			}
+
+			offer := map[string]interface{}{
+				"trade_nft_id":        tokenID,
+				"locked_token_id":     metadata.TradeOffer.LockedTokenID,
+				"locked_amount":       metadata.TradeOffer.LockedAmount,
+				"asking_price":        metadata.TradeOffer.AskingPrice,
+				"asking_token_id":     metadata.TradeOffer.AskingTokenID,
+				"seller":              metadata.TradeOffer.Seller,
+				"current_owner":       currentOwner,
+				"expiration_time":     metadata.TradeOffer.ExpirationTime,
+				"creation_time":       metadata.TradeOffer.CreationTime,
+			}
+
+			// Add ticker information for better display
+			if metadata.TradeOffer.LockedTokenID != "SHADOW" {
+				if lockedTokenInfo, err := tokenState.GetTokenInfo(metadata.TradeOffer.LockedTokenID); err == nil {
+					offer["locked_token_ticker"] = lockedTokenInfo.Ticker
+					offer["locked_token_name"] = lockedTokenInfo.Name
+				}
+			}
+
+			offers = append(offers, offer)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(offers)
+}
+
+// handleMarketplaceCreateOffer creates a new trade offer
+func (sn *ShadowNode) handleMarketplaceCreateOffer(w http.ResponseWriter, r *http.Request) {
+	session, authenticated := validateSession(r)
+	if !authenticated {
+		http.Error(w, "Not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	var offerData struct {
+		LockedTokenID   string  `json:"locked_token_id"`
+		LockedAmount    float64 `json:"locked_amount"`
+		AskingPrice     uint64  `json:"asking_price"`     // In satoshis
+		AskingTokenID   string  `json:"asking_token_id"`  // Token to receive (empty for SHADOW)
+		ExpirationHours int     `json:"expiration_hours"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&offerData); err != nil {
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	// Validate input
+	if offerData.LockedTokenID == "" || offerData.LockedAmount <= 0 || offerData.AskingPrice == 0 {
+		http.Error(w, "Invalid offer parameters", http.StatusBadRequest)
+		return
+	}
+
+	// Load wallet
+	wallet, err := loadWallet(session.WalletName)
+	if err != nil {
+		http.Error(w, "Failed to load wallet", http.StatusInternalServerError)
+		return
+	}
+
+	// Create transaction
+	tx := NewTransaction()
+
+	// Convert amount to proper units if it's a token
+	var amountInBaseUnits uint64
+	if offerData.LockedTokenID == "SHADOW" {
+		amountInBaseUnits = uint64(offerData.LockedAmount * 100000000) // Convert to satoshis
+	} else {
+		// For tokens, we need to check decimals
+		if sn.blockchain != nil {
+			tokenState := sn.blockchain.GetTokenState()
+			if tokenInfo, err := tokenState.GetTokenInfo(offerData.LockedTokenID); err == nil {
+				multiplier := uint64(1)
+				for i := uint8(0); i < tokenInfo.Decimals; i++ {
+					multiplier *= 10
+				}
+				amountInBaseUnits = uint64(offerData.LockedAmount * float64(multiplier))
+			} else {
+				amountInBaseUnits = uint64(offerData.LockedAmount)
+			}
+		} else {
+			amountInBaseUnits = uint64(offerData.LockedAmount)
+		}
+	}
+
+	// Add trade offer operation
+	tx.AddTradeOffer(
+		offerData.LockedTokenID,
+		amountInBaseUnits,
+		offerData.AskingPrice,
+		offerData.AskingTokenID, // Token to receive (empty string for SHADOW)
+		session.Address,
+		offerData.ExpirationHours,
+	)
+
+	// Sign and submit transaction
+	signedTx, err := SignTransactionWithWallet(tx, wallet)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to sign transaction: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Submit to mempool
+	if sn.mempool == nil {
+		http.Error(w, "Mempool not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	err = sn.mempool.AddTransaction(signedTx, SourceAPI)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to submit transaction: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	response := map[string]interface{}{
+		"success":     true,
+		"message":     "Trade offer created successfully",
+		"tx_hash":     signedTx.TxHash,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// handleMarketplacePurchase executes a trade offer purchase
+func (sn *ShadowNode) handleMarketplacePurchase(w http.ResponseWriter, r *http.Request) {
+	session, authenticated := validateSession(r)
+	if !authenticated {
+		http.Error(w, "Not authenticated", http.StatusUnauthorized)
+		return
+	}
+
+	var purchaseData struct {
+		TradeNftID string `json:"trade_nft_id"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&purchaseData); err != nil {
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
+		return
+	}
+
+	if purchaseData.TradeNftID == "" {
+		http.Error(w, "Trade NFT ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// Load wallet
+	wallet, err := loadWallet(session.WalletName)
+	if err != nil {
+		http.Error(w, "Failed to load wallet", http.StatusInternalServerError)
+		return
+	}
+
+	// Create transaction
+	tx := NewTransaction()
+
+	// Add trade execute operation
+	tx.AddTradeExecute(purchaseData.TradeNftID, session.Address)
+
+	// Sign and submit transaction
+	signedTx, err := SignTransactionWithWallet(tx, wallet)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to sign transaction: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Submit to mempool
+	if sn.mempool == nil {
+		http.Error(w, "Mempool not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	err = sn.mempool.AddTransaction(signedTx, SourceAPI)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to submit transaction: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	response := map[string]interface{}{
+		"success":     true,
+		"message":     "Trade executed successfully",
+		"tx_hash":     signedTx.TxHash,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }

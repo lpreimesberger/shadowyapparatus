@@ -141,13 +141,13 @@ func (sn *ShadowNode) initializeServices() error {
 		"data_directory": sn.config.ShadowConfig.BlockchainDirectory,
 	})
 
-	// Initialize mempool
-	sn.mempool = NewMempool(sn.config.MempoolConfig)
-	
-	// Enable transaction broadcasting if consensus is enabled
+	// Enable transaction broadcasting if consensus is enabled (before creating mempool)
 	if sn.config.EnableConsensus {
 		sn.config.MempoolConfig.EnableBroadcast = true
 	}
+	
+	// Initialize mempool
+	sn.mempool = NewMempool(sn.config.MempoolConfig)
 	
 	sn.updateHealthStatus("mempool", "healthy", nil, map[string]interface{}{
 		"max_size": sn.config.MempoolConfig.MaxMempoolSize,

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -426,6 +427,508 @@ Scans the blockchain to calculate confirmed balance and recent transaction activ
 	},
 }
 
+// Token commands
+var tokensCmd = &cobra.Command{
+	Use:   "tokens",
+	Short: "Token operations for the wallet",
+	Long:  `Manage token balances, trust settings, and token operations.`,
+}
+
+var tokenBalancesCmd = &cobra.Command{
+	Use:   "balances [wallet-name]",
+	Short: "Show token balances for a wallet",
+	Args:  cobra.MaximumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		var walletName string
+		if len(args) > 0 {
+			walletName = args[0]
+		} else {
+			// Use first available wallet
+			wallets, err := listWallets()
+			if err != nil || len(wallets) == 0 {
+				fmt.Printf("Error: No wallets found\n")
+				os.Exit(1)
+			}
+			walletName = wallets[0].Name
+		}
+
+		wallet, err := loadWallet(walletName)
+		if err != nil {
+			fmt.Printf("Error loading wallet '%s': %v\n", walletName, err)
+			os.Exit(1)
+		}
+
+		showTokenBalances := func() error {
+			// Load blockchain to get token state
+			config, err := loadConfig()
+			if err != nil {
+				return fmt.Errorf("failed to load config: %w", err)
+			}
+
+			blockchain, err := NewBlockchain(config)
+			if err != nil {
+				return fmt.Errorf("failed to initialize blockchain: %w", err)
+			}
+
+			tokenState := blockchain.GetTokenState()
+			balances, err := tokenState.GetAllTokenBalances(wallet.Address)
+			if err != nil {
+				return fmt.Errorf("failed to get token balances: %w", err)
+			}
+
+			// Initialize trust manager
+			trustManager, err := NewTokenTrustManager(wallet.Name, getWalletDir())
+			if err != nil {
+				return fmt.Errorf("failed to initialize token trust manager: %w", err)
+			}
+
+			fmt.Printf("Token Balances for Wallet: %s\n", wallet.Name)
+			fmt.Printf("Address: %s\n", wallet.Address)
+			fmt.Printf("==================================================\n\n")
+
+			if len(balances) == 0 {
+				fmt.Printf("No token balances found.\n")
+				return nil
+			}
+
+			// Show each token balance with trust info
+			for _, balance := range balances {
+				trust := trustManager.GetTokenTrust(balance.TokenID)
+				
+				// Update metadata cache if we have current info
+				if balance.TokenInfo != nil {
+					trustManager.UpdateTokenMetadata(balance.TokenID, 
+						balance.TokenInfo.Name, balance.TokenInfo.Ticker, balance.TokenInfo.Creator)
+				}
+
+				fmt.Printf("Token: %s (%s)\n", balance.TokenInfo.Name, balance.TokenInfo.Ticker)
+				fmt.Printf("  Token ID: %s\n", balance.TokenID)
+				fmt.Printf("  Balance:  %d\n", balance.Balance)
+				fmt.Printf("  Creator:  %s\n", balance.TokenInfo.Creator)
+				
+				// Trust status with warning for unknown tokens
+				switch trust.TrustLevel {
+				case TrustUnknown:
+					fmt.Printf("  Trust:    ⚠️  UNKNOWN (Score: %.1f/10)\n", trust.TrackerScore*10)
+				case TrustBanned:
+					fmt.Printf("  Trust:    🚫 BANNED\n")
+				case TrustAccepted:
+					fmt.Printf("  Trust:    ✅ ACCEPTED (Score: %.1f/10)\n", trust.TrackerScore*10)
+				case TrustVerified:
+					fmt.Printf("  Trust:    🔒 VERIFIED (Score: %.1f/10)\n", trust.TrackerScore*10)
+				}
+				
+				if trust.Notes != "" {
+					fmt.Printf("  Notes:    %s\n", trust.Notes)
+				}
+				fmt.Printf("\n")
+			}
+
+			// Show unknown tokens warning
+			unknownCount := 0
+			for _, balance := range balances {
+				trust := trustManager.GetTokenTrust(balance.TokenID)
+				if trust.TrustLevel == TrustUnknown {
+					unknownCount++
+				}
+			}
+
+			if unknownCount > 0 {
+				fmt.Printf("⚠️  WARNING: %d unknown tokens detected!\n", unknownCount)
+				fmt.Printf("Use 'wallet tokens accept <token-id>' to trust tokens\n")
+				fmt.Printf("Use 'wallet tokens ban <token-id>' to hide unwanted tokens\n")
+			}
+
+			return nil
+		}
+
+		if err := showTokenBalances(); err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+	},
+}
+
+var tokenAcceptCmd = &cobra.Command{
+	Use:   "accept <token-id> [wallet-name]",
+	Short: "Accept a token (mark as trusted)",
+	Args:  cobra.RangeArgs(1, 2),
+	Run: func(cmd *cobra.Command, args []string) {
+		tokenID := args[0]
+		
+		var walletName string
+		if len(args) > 1 {
+			walletName = args[1]
+		} else {
+			// Use first available wallet
+			wallets, err := listWallets()
+			if err != nil || len(wallets) == 0 {
+				fmt.Printf("Error: No wallets found\n")
+				os.Exit(1)
+			}
+			walletName = wallets[0].Name
+		}
+
+		wallet, err := loadWallet(walletName)
+		if err != nil {
+			fmt.Printf("Error loading wallet '%s': %v\n", walletName, err)
+			os.Exit(1)
+		}
+
+		// Initialize trust manager
+		trustManager, err := NewTokenTrustManager(wallet.Name, getWalletDir())
+		if err != nil {
+			fmt.Printf("Error initializing token trust manager: %v\n", err)
+			os.Exit(1)
+		}
+
+		// Get token info from blockchain
+		config, err := loadConfig()
+		if err != nil {
+			fmt.Printf("Error loading config: %v\n", err)
+			os.Exit(1)
+		}
+
+		blockchain, err := NewBlockchain(config)
+		if err != nil {
+			fmt.Printf("Error initializing blockchain: %v\n", err)
+			os.Exit(1)
+		}
+
+		tokenState := blockchain.GetTokenState()
+		metadata, err := tokenState.GetTokenInfo(tokenID)
+		if err != nil {
+			fmt.Printf("Error: Token %s not found\n", tokenID)
+			os.Exit(1)
+		}
+
+		// Update metadata and accept token
+		if err := trustManager.UpdateTokenMetadata(tokenID, metadata.Name, metadata.Ticker, metadata.Creator); err != nil {
+			fmt.Printf("Error updating token metadata: %v\n", err)
+			os.Exit(1)
+		}
+
+		notes, _ := cmd.Flags().GetString("notes")
+		if err := trustManager.AcceptToken(tokenID, notes); err != nil {
+			fmt.Printf("Error accepting token: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("✅ Token accepted successfully!\n")
+		fmt.Printf("Token: %s (%s)\n", metadata.Name, metadata.Ticker)
+		fmt.Printf("ID: %s\n", tokenID)
+		if notes != "" {
+			fmt.Printf("Notes: %s\n", notes)
+		}
+	},
+}
+
+var tokenBanCmd = &cobra.Command{
+	Use:   "ban <token-id> [wallet-name]",
+	Short: "Ban a token (hide from wallet)",
+	Args:  cobra.RangeArgs(1, 2),
+	Run: func(cmd *cobra.Command, args []string) {
+		tokenID := args[0]
+		
+		var walletName string
+		if len(args) > 1 {
+			walletName = args[1]
+		} else {
+			// Use first available wallet
+			wallets, err := listWallets()
+			if err != nil || len(wallets) == 0 {
+				fmt.Printf("Error: No wallets found\n")
+				os.Exit(1)
+			}
+			walletName = wallets[0].Name
+		}
+
+		wallet, err := loadWallet(walletName)
+		if err != nil {
+			fmt.Printf("Error loading wallet '%s': %v\n", walletName, err)
+			os.Exit(1)
+		}
+
+		// Initialize trust manager
+		trustManager, err := NewTokenTrustManager(wallet.Name, getWalletDir())
+		if err != nil {
+			fmt.Printf("Error initializing token trust manager: %v\n", err)
+			os.Exit(1)
+		}
+
+		reason, _ := cmd.Flags().GetString("reason")
+		if err := trustManager.BanToken(tokenID, reason); err != nil {
+			fmt.Printf("Error banning token: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("🚫 Token banned successfully!\n")
+		fmt.Printf("ID: %s\n", tokenID)
+		if reason != "" {
+			fmt.Printf("Reason: %s\n", reason)
+		}
+	},
+}
+
+var tokenMeltCmd = &cobra.Command{
+	Use:   "melt <token-id> <amount> [wallet-name]",
+	Short: "Melt tokens back to SHADOW (destroys tokens permanently)",
+	Long: `Melt (burn) tokens to reclaim locked SHADOW. 
+
+⚠️  WARNING: This action is IRREVERSIBLE! ⚠️
+Melted tokens are permanently destroyed and cannot be recovered.
+You will receive the proportional amount of locked SHADOW.
+
+Example: wallet tokens melt abc123... 10.5 my-wallet`,
+	Args: cobra.RangeArgs(2, 3),
+	Run: func(cmd *cobra.Command, args []string) {
+		tokenID := args[0]
+		amountStr := args[1]
+		
+		// Parse amount
+		amount, err := strconv.ParseFloat(amountStr, 64)
+		if err != nil || amount <= 0 {
+			fmt.Printf("Error: Invalid amount '%s'. Must be a positive number.\n", amountStr)
+			os.Exit(1)
+		}
+		
+		// Get wallet name
+		walletName := ""
+		if len(args) > 2 {
+			walletName = args[2]
+		} else {
+			wallets, err := listWallets()
+			if err != nil || len(wallets) == 0 {
+				fmt.Printf("No wallets found. Please create a wallet first.\n")
+				os.Exit(1)
+			}
+			walletName = wallets[0].Name
+		}
+		
+		// Load wallet
+		wallet, err := loadWallet(walletName)
+		if err != nil {
+			fmt.Printf("Error loading wallet '%s': %v\n", walletName, err)
+			os.Exit(1)
+		}
+		
+		// Initialize blockchain to get token information
+		config, err := loadConfig()
+		if err != nil {
+			fmt.Printf("Error loading config: %v\n", err)
+			os.Exit(1)
+		}
+		blockchain, err := NewBlockchain(config)
+		if err != nil {
+			fmt.Printf("Error initializing blockchain: %v\n", err)
+			os.Exit(1)
+		}
+
+		tokenState := blockchain.GetTokenState()
+		tokenInfo, err := tokenState.GetTokenInfo(tokenID)
+		if err != nil {
+			fmt.Printf("Error: Token %s not found\n", tokenID)
+			os.Exit(1)
+		}
+		
+		// Get current balance
+		balance, err := tokenState.GetTokenBalance(tokenID, wallet.Address)
+		if err != nil {
+			balance = 0 // No balance if error
+		}
+		
+		// Convert from base units to display units
+		var currentBalance float64
+		if tokenInfo.Decimals > 0 {
+			divisor := float64(1)
+			for i := uint8(0); i < tokenInfo.Decimals; i++ {
+				divisor *= 10
+			}
+			currentBalance = float64(balance) / divisor
+		} else {
+			currentBalance = float64(balance)
+		}
+		
+		// Check sufficient balance
+		if amount > currentBalance {
+			fmt.Printf("Error: Insufficient balance. You have %.8f %s, trying to melt %.8f\n", 
+				currentBalance, tokenInfo.Ticker, amount)
+			os.Exit(1)
+		}
+		
+		// Calculate SHADOW to be received
+		shadowPerToken := float64(tokenInfo.LockAmount) / 100000000.0 // Convert satoshi to SHADOW
+		shadowToReceive := amount * shadowPerToken
+		
+		// Show scary warning
+		fmt.Printf("\n🔥 TOKEN MELT WARNING 🔥\n")
+		fmt.Printf("═══════════════════════════════════════════════════\n")
+		fmt.Printf("You are about to PERMANENTLY DESTROY tokens!\n\n")
+		fmt.Printf("Token:           %s (%s)\n", tokenInfo.Name, tokenInfo.Ticker)
+		fmt.Printf("Amount to melt:  %.8f %s\n", amount, tokenInfo.Ticker)
+		fmt.Printf("SHADOW received: %.8f SHADOW\n", shadowToReceive)
+		fmt.Printf("Your balance:    %.8f %s\n", currentBalance, tokenInfo.Ticker)
+		fmt.Printf("Remaining:       %.8f %s\n", currentBalance-amount, tokenInfo.Ticker)
+		fmt.Printf("\n⚠️  THIS ACTION CANNOT BE UNDONE! ⚠️\n")
+		fmt.Printf("Melted tokens are PERMANENTLY DESTROYED!\n")
+		fmt.Printf("═══════════════════════════════════════════════════\n")
+		
+		// Require explicit confirmation
+		fmt.Printf("\nType 'MELT' (all caps) to confirm: ")
+		var confirmation string
+		fmt.Scanln(&confirmation)
+		
+		if confirmation != "MELT" {
+			fmt.Printf("Melt cancelled.\n")
+			os.Exit(0)
+		}
+		
+		// Convert amount to base units
+		var amountTokenUnits uint64
+		if tokenInfo.Decimals > 0 {
+			multiplier := uint64(1)
+			for i := uint8(0); i < tokenInfo.Decimals; i++ {
+				multiplier *= 10
+			}
+			amountTokenUnits = uint64(amount * float64(multiplier))
+		} else {
+			amountTokenUnits = uint64(amount)
+		}
+		
+		// Create transaction
+		tx := NewTransaction()
+		tx.AddOutput(wallet.Address, 1) // Minimal SHADOW output
+		tx.AddTokenMelt(tokenID, amountTokenUnits, wallet.Address)
+		
+		// Add placeholder input
+		placeholderTxHash := "0000000000000000000000000000000000000000000000000000000000000000"
+		tx.AddInput(placeholderTxHash, 0)
+		
+		// Sign transaction
+		signedTx, err := SignTransactionWithWallet(tx, wallet)
+		if err != nil {
+			fmt.Printf("Error signing transaction: %v\n", err)
+			os.Exit(1)
+		}
+		
+		// For CLI commands, we output the transaction for manual submission
+		fmt.Printf("\n🔥 Token melt transaction created successfully!\n")
+		fmt.Printf("Transaction Hash: %s\n", signedTx.TxHash)
+		fmt.Printf("\nTo submit this transaction, use the 'shadowy wallet send-raw' command with the following transaction data:\n")
+		
+		// Output the transaction for manual submission
+		txData, err := json.MarshalIndent(signedTx, "", "  ")
+		if err != nil {
+			fmt.Printf("Error marshaling transaction: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("\n%s\n", txData)
+		
+		fmt.Printf("\n✅ Ready to submit! Copy the transaction data above and use 'shadowy wallet send-raw' to submit it to the network.\n")
+		fmt.Printf("Expected result: %.8f %s tokens melted for %.8f SHADOW\n", 
+			amount, tokenInfo.Ticker, shadowToReceive)
+	},
+}
+
+var tokenTrustCmd = &cobra.Command{
+	Use:   "trust [wallet-name]",
+	Short: "Show token trust settings",
+	Args:  cobra.MaximumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		var walletName string
+		if len(args) > 0 {
+			walletName = args[0]
+		} else {
+			// Use first available wallet
+			wallets, err := listWallets()
+			if err != nil || len(wallets) == 0 {
+				fmt.Printf("Error: No wallets found\n")
+				os.Exit(1)
+			}
+			walletName = wallets[0].Name
+		}
+
+		wallet, err := loadWallet(walletName)
+		if err != nil {
+			fmt.Printf("Error loading wallet '%s': %v\n", walletName, err)
+			os.Exit(1)
+		}
+
+		// Initialize trust manager
+		trustManager, err := NewTokenTrustManager(wallet.Name, getWalletDir())
+		if err != nil {
+			fmt.Printf("Error initializing token trust manager: %v\n", err)
+			os.Exit(1)
+		}
+
+		summary := trustManager.GetTrustSummary()
+		
+		fmt.Printf("Token Trust Settings for Wallet: %s\n", wallet.Name)
+		fmt.Printf("============================================\n\n")
+		
+		fmt.Printf("Summary:\n")
+		fmt.Printf("  Total tokens: %d\n", summary["total"])
+		fmt.Printf("  ✅ Accepted:  %d\n", summary["accepted"])
+		fmt.Printf("  ⚠️  Unknown:   %d\n", summary["unknown"])
+		fmt.Printf("  🚫 Banned:    %d\n", summary["banned"])
+		fmt.Printf("  🔒 Verified:  %d\n", summary["verified"])
+		fmt.Printf("\n")
+
+		// Show detailed trust info
+		showDetails, _ := cmd.Flags().GetBool("details")
+		if showDetails {
+			// Show accepted tokens
+			accepted := trustManager.ListTrustedTokens()
+			if len(accepted) > 0 {
+				fmt.Printf("✅ Accepted Tokens:\n")
+				for tokenID, trust := range accepted {
+					fmt.Printf("  %s (%s) - %s\n", trust.Name, trust.Ticker, tokenID)
+					if trust.Notes != "" {
+						fmt.Printf("    Notes: %s\n", trust.Notes)
+					}
+				}
+				fmt.Printf("\n")
+			}
+
+			// Show unknown tokens
+			unknown := trustManager.ListUnknownTokens()
+			if len(unknown) > 0 {
+				fmt.Printf("⚠️  Unknown Tokens:\n")
+				for tokenID, trust := range unknown {
+					name := trust.Name
+					if name == "" {
+						name = "Unknown"
+					}
+					fmt.Printf("  %s - %s\n", name, tokenID)
+				}
+				fmt.Printf("\n")
+			}
+
+			// Show banned tokens
+			banned := trustManager.ListBannedTokens()
+			if len(banned) > 0 {
+				fmt.Printf("🚫 Banned Tokens:\n")
+				for tokenID, trust := range banned {
+					name := trust.Name
+					if name == "" {
+						name = "Unknown"
+					}
+					fmt.Printf("  %s - %s\n", name, tokenID)
+					if trust.Notes != "" {
+						fmt.Printf("    Reason: %s\n", trust.Notes)
+					}
+				}
+				fmt.Printf("\n")
+			}
+		}
+
+		if summary["unknown"] > 0 {
+			fmt.Printf("💡 Use 'wallet tokens balances' to see unknown tokens\n")
+			fmt.Printf("💡 Use 'wallet tokens accept <token-id>' to trust tokens\n")
+		}
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(walletCmd)
 	walletCmd.AddCommand(generateCmd)
@@ -434,6 +937,14 @@ func init() {
 	walletCmd.AddCommand(listCmd)
 	walletCmd.AddCommand(showCmd)
 	walletCmd.AddCommand(balanceCmd)
+	walletCmd.AddCommand(tokensCmd)
+	
+	// Token subcommands
+	tokensCmd.AddCommand(tokenBalancesCmd)
+	tokensCmd.AddCommand(tokenAcceptCmd)
+	tokensCmd.AddCommand(tokenBanCmd)
+	tokensCmd.AddCommand(tokenMeltCmd)
+	tokensCmd.AddCommand(tokenTrustCmd)
 	
 	// Add wallet-dir flag to all wallet commands
 	walletCmd.PersistentFlags().StringVar(&walletDir, "wallet-dir", "", 
@@ -441,6 +952,11 @@ func init() {
 	
 	// Add data flag to balance command for blockchain directory override
 	balanceCmd.Flags().StringP("data", "d", "", "Override blockchain data directory")
+	
+	// Add flags for token commands
+	tokenAcceptCmd.Flags().StringP("notes", "n", "", "Notes about why this token is trusted")
+	tokenBanCmd.Flags().StringP("reason", "r", "", "Reason for banning this token")
+	tokenTrustCmd.Flags().BoolP("details", "d", false, "Show detailed trust information")
 }
 
 // DeriveAddress creates a Shadowy address from a public key
