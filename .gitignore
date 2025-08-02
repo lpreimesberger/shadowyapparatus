@@ -15,5 +15,8 @@ shadowyapparatus
 burn_in_logs/
 shadowy-tracker/*.pid
 shadowy-tracker/tracker*
+.idea
+test_build
+
 
 

@@ -1492,6 +1492,105 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
             }
         }
         
+        /* Pool-specific styles */
+        .pools-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        
+        .pool-item {
+            background: #2a2a2a;
+            border: 1px solid #505050;
+            border-radius: 8px;
+            padding: 1rem;
+        }
+        
+        .pool-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+        
+        .pool-header h4 {
+            color: #60a5fa;
+            margin: 0;
+        }
+        
+        .pool-fee {
+            background: #1f2937;
+            color: #fbbf24;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+        
+        .pool-details {
+            display: flex;
+            flex-direction: column;
+            gap: 0.25rem;
+            font-size: 0.9rem;
+        }
+        
+        .pool-pair {
+            color: #d1d5db;
+            font-weight: bold;
+        }
+        
+        .pool-address {
+            color: #9ca3af;
+        }
+        
+        .pool-address code {
+            background: #1f2937;
+            padding: 0.2rem 0.4rem;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.8rem;
+        }
+        
+        .pool-creator {
+            color: #6b7280;
+        }
+        
+        .no-pools {
+            text-align: center;
+            color: #9ca3af;
+            padding: 2rem;
+            background: #2a2a2a;
+            border-radius: 8px;
+            border: 1px solid #404040;
+        }
+        
+        .refresh-controls {
+            margin-bottom: 1rem;
+        }
+        
+        .refresh-btn {
+            background: #374151;
+            color: #d1d5db;
+            border: 1px solid #4b5563;
+            padding: 0.5rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        
+        .refresh-btn:hover {
+            background: #4b5563;
+        }
+        
+        .cost-info {
+            background: #1e3a8a;
+            border: 1px solid #3b82f6;
+            border-radius: 6px;
+            padding: 1rem;
+            color: #dbeafe;
+            text-align: center;
+        }
+        
         @media (max-width: 768px) {
             .marketplace-sections {
                 grid-template-columns: 1fr;
@@ -1503,6 +1602,12 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
             
             .offer-details {
                 grid-template-columns: 1fr;
+            }
+            
+            .pool-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 0.5rem;
             }
         }
         
@@ -1763,6 +1868,7 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
                 <!-- Swap sub-tabs -->
                 <div id="swap-subtabs" class="sub-tab-header">
                     <button class="sub-tab-button active" onclick="switchSubTab('swap', 'exchange')">🏪 Exchange</button>
+                    <button class="sub-tab-button" onclick="switchSubTab('swap', 'liquidity')">💧 Liquidity</button>
                 </div>
             </div>
 
@@ -2097,6 +2203,112 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
                         <button type="submit" id="createTokenBtn" class="btn">⚒️ Create Token</button>
                     </div>
                 </form>
+            </div>
+
+            <!-- Swap Liquidity Tab -->
+            <div id="swap-liquidity-tab" class="tab-content">
+                <div class="marketplace-header">
+                    <h2>💧 Liquidity Pools</h2>
+                    <p>View existing liquidity pools and create new ones. Pools use constant product (x*y=k) automated market making.</p>
+                </div>
+                
+                <div class="marketplace-sections">
+                    <!-- Create Pool Section -->
+                    <div class="marketplace-section">
+                        <h3>🏊 Create Liquidity Pool</h3>
+                        
+                        <form id="createPoolForm" class="trade-form">
+                            <div class="form-group">
+                                <label for="poolTokenASelect">Token A</label>
+                                <select id="poolTokenASelect" name="poolTokenA" required>
+                                    <option value="">Select first token...</option>
+                                    <option value="SHADOW">SHADOW</option>
+                                </select>
+                                <div class="form-help">
+                                    First token in the trading pair.
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="poolTokenBSelect">Token B</label>
+                                <select id="poolTokenBSelect" name="poolTokenB" required>
+                                    <option value="">Select second token...</option>
+                                    <option value="SHADOW">SHADOW</option>
+                                </select>
+                                <div class="form-help">
+                                    Second token in the trading pair.
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="poolInitialRatioA">Initial Amount A</label>
+                                <input type="number" id="poolInitialRatioA" name="poolInitialRatioA" step="any" min="0" required>
+                                <div class="balance-display" id="poolTokenABalance"></div>
+                                <div class="form-help">
+                                    Initial amount of Token A to set the x*y=k constant.
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="poolInitialRatioB">Initial Amount B</label>
+                                <input type="number" id="poolInitialRatioB" name="poolInitialRatioB" step="any" min="0" required>
+                                <div class="balance-display" id="poolTokenBBalance"></div>
+                                <div class="form-help">
+                                    Initial amount of Token B to set the x*y=k constant.
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="poolFeeRate">Fee Rate (%)</label>
+                                <select id="poolFeeRate" name="poolFeeRate" required>
+                                    <option value="10">0.1% (Low)</option>
+                                    <option value="30" selected>0.3% (Standard)</option>
+                                    <option value="50">0.5% (High)</option>
+                                    <option value="100">1.0% (Premium)</option>
+                                </select>
+                                <div class="form-help">
+                                    Trading fee charged to swappers. Higher fees = more rewards for liquidity providers.
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="poolName">Pool Name</label>
+                                <input type="text" id="poolName" name="poolName" placeholder="e.g., CATGIRL/SHADOW Pool" required>
+                                <div class="form-help">
+                                    Human-readable name for your pool.
+                                </div>
+                            </div>
+                            
+                            <div class="form-group">
+                                <label for="poolTicker">Pool Ticker</label>
+                                <input type="text" id="poolTicker" name="poolTicker" placeholder="e.g., CATSHADOW" maxlength="12" required>
+                                <div class="form-help">
+                                    Short symbol for the pool NFT (max 12 characters).
+                                </div>
+                            </div>
+                            
+                            <div class="cost-info">
+                                <strong>Pool Creation Cost: 5.0 SHADOW</strong>
+                                <br>
+                                <small>This creates permanent on-chain infrastructure with an L-address.</small>
+                            </div>
+                            
+                            <button type="submit" class="submit-btn">🏊 Create Pool (5.0 SHADOW)</button>
+                        </form>
+                    </div>
+                    
+                    <!-- Active Pools Section -->
+                    <div class="marketplace-section">
+                        <h3>🌊 Active Liquidity Pools</h3>
+                        <div class="refresh-controls">
+                            <button onclick="refreshPools()" class="refresh-btn">🔄 Refresh</button>
+                        </div>
+                        
+                        <div id="poolsList" class="pools-list">
+                            <div class="loading">Loading active pools...</div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <!-- Node Blocks Tab -->
@@ -2589,10 +2801,232 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
                     
                     // Set up event listeners now that elements exist
                     setupMarketplaceEventListeners();
+                    setupPoolFunctionality();
                 }, 100);
                 
             } catch (error) {
                 console.error('Error loading marketplace:', error);
+            }
+        }
+        
+        // Pool creation and management functions
+        async function submitPoolCreation(event) {
+            event.preventDefault();
+            console.log('submitPoolCreation called');
+            
+            const form = document.getElementById('createPoolForm');
+            const formData = new FormData(form);
+            const submitBtn = form.querySelector('button[type="submit"]');
+            
+            const poolData = {
+                tokenA: formData.get('poolTokenA'),
+                tokenB: formData.get('poolTokenB'),
+                initialRatioA: parseFloat(formData.get('poolInitialRatioA')),
+                initialRatioB: parseFloat(formData.get('poolInitialRatioB')),
+                feeRate: parseInt(formData.get('poolFeeRate')),
+                name: formData.get('poolName'),
+                ticker: formData.get('poolTicker')
+            };
+            
+            console.log('Pool creation data:', poolData);
+            
+            if (!poolData.tokenA || !poolData.tokenB || poolData.initialRatioA <= 0 || poolData.initialRatioB <= 0) {
+                alert('Please fill in all required fields with valid values.');
+                return;
+            }
+            
+            if (poolData.tokenA === poolData.tokenB) {
+                alert('Token A and Token B must be different.');
+                return;
+            }
+            
+            if (submitBtn) {
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Creating Pool...';
+            }
+            
+            try {
+                const response = await fetch('/api/pool/create', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(poolData)
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok && result.success) {
+                    alert('Pool created successfully!\\nL-Address: ' + result.l_address);
+                    form.reset();
+                    refreshPools();
+                } else {
+                    alert('Failed to create pool: ' + (result.error || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Pool creation error:', error);
+                alert('Failed to create pool: ' + error.message);
+            } finally {
+                if (submitBtn) {
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = '🏊 Create Pool (5.0 SHADOW)';
+                }
+            }
+        }
+        
+        async function refreshPools() {
+            const poolsList = document.getElementById('poolsList');
+            if (!poolsList) return;
+            
+            poolsList.innerHTML = '<div class="loading">Loading active pools...</div>';
+            
+            try {
+                const response = await fetch('/api/pools');
+                if (!response.ok) {
+                    throw new Error('Failed to fetch pools');
+                }
+                
+                const pools = await response.json();
+                
+                if (pools.length === 0) {
+                    poolsList.innerHTML = '<div class="no-pools">No active liquidity pools found. Create the first one!</div>';
+                    return;
+                }
+                
+                let poolsHTML = '';
+                pools.forEach(pool => {
+                    const tokenAName = pool.token_a === 'SHADOW' ? 'SHADOW' : (pool.token_a_name || pool.token_a.substring(0, 8) + '...');
+                    const tokenBName = pool.token_b === 'SHADOW' ? 'SHADOW' : (pool.token_b_name || pool.token_b.substring(0, 8) + '...');
+                    const feePercent = (pool.fee_rate / 100).toFixed(1);
+                    
+                    poolsHTML += '<div class="pool-item">';
+                    poolsHTML += '  <div class="pool-header">';
+                    poolsHTML += '    <h4>💧 ' + pool.name + '</h4>';
+                    poolsHTML += '    <span class="pool-fee">' + feePercent + '% fee</span>';
+                    poolsHTML += '  </div>';
+                    poolsHTML += '  <div class="pool-details">';
+                    poolsHTML += '    <div class="pool-pair">' + tokenAName + ' ↔ ' + tokenBName + '</div>';
+                    poolsHTML += '    <div class="pool-address">L-Address: <code>' + pool.l_address + '</code></div>';
+                    poolsHTML += '    <div class="pool-creator">Created by: ' + pool.creator.substring(0, 8) + '...</div>';
+                    poolsHTML += '  </div>';
+                    poolsHTML += '</div>';
+                });
+                
+                poolsList.innerHTML = poolsHTML;
+                
+            } catch (error) {
+                console.error('Failed to load pools:', error);
+                poolsList.innerHTML = '<div class="error">Failed to load pools: ' + error.message + '</div>';
+            }
+        }
+        
+        function setupPoolFunctionality() {
+            const createPoolForm = document.getElementById('createPoolForm');
+            if (createPoolForm) {
+                createPoolForm.addEventListener('submit', submitPoolCreation);
+                console.log('💧 Added submit listener to createPoolForm');
+            }
+            
+            // Update balances when tokens are selected
+            const poolTokenASelect = document.getElementById('poolTokenASelect');
+            const poolTokenBSelect = document.getElementById('poolTokenBSelect');
+            
+            if (poolTokenASelect) {
+                poolTokenASelect.addEventListener('change', () => updatePoolTokenBalance('A'));
+            }
+            if (poolTokenBSelect) {
+                poolTokenBSelect.addEventListener('change', () => updatePoolTokenBalance('B'));
+            }
+            
+            // Load tokens into pool selectors (do this after form is ready)
+            setTimeout(() => {
+                loadPoolTokens();
+            }, 500);
+            
+            // Load pools initially
+            refreshPools();
+        }
+        
+        async function loadPoolTokens() {
+            try {
+                const response = await fetch('/wallet/tokens');
+                if (!response.ok) {
+                    throw new Error('Failed to fetch tokens');
+                }
+                
+                const data = await response.json();
+                console.log('💧 Pool tokens loaded:', data);
+                
+                const poolTokenASelect = document.getElementById('poolTokenASelect');
+                const poolTokenBSelect = document.getElementById('poolTokenBSelect');
+                
+                if (poolTokenASelect && poolTokenBSelect) {
+                    // Clear existing options
+                    poolTokenASelect.innerHTML = '<option value="">Select first token...</option><option value="SHADOW">SHADOW</option>';
+                    poolTokenBSelect.innerHTML = '<option value="">Select second token...</option><option value="SHADOW">SHADOW</option>';
+                    
+                    // Check if data has balances array (correct structure from /wallet/tokens)
+                    const balances = data.balances || [];
+                    
+                    if (Array.isArray(balances) && balances.length > 0) {
+                        // Filter tokens with balance > 0 and add them
+                        const tokensWithBalance = balances.filter(b => b.balance > 0);
+                        tokensWithBalance.forEach(balance => {
+                            const tokenInfo = balance.token_info || {};
+                            const displayName = tokenInfo.name && tokenInfo.ticker ? 
+                                tokenInfo.name + ' (' + tokenInfo.ticker + ')' : 
+                                balance.token_id.substring(0, 16) + '...';
+                            const option = '<option value="' + balance.token_id + '">' + displayName + '</option>';
+                            poolTokenASelect.innerHTML += option;
+                            poolTokenBSelect.innerHTML += option;
+                        });
+                        console.log('💧 Added ' + tokensWithBalance.length + ' tokens to pool selectors');
+                    } else {
+                        console.log('💧 No tokens with balance found in response');
+                    }
+                }
+            } catch (error) {
+                console.error('💧 Failed to load tokens for pools:', error);
+            }
+        }
+        
+        async function updatePoolTokenBalance(tokenPosition) {
+            const selectId = 'poolToken' + tokenPosition + 'Select';
+            const balanceId = 'poolToken' + tokenPosition + 'Balance';
+            
+            const select = document.getElementById(selectId);
+            const balanceDiv = document.getElementById(balanceId);
+            
+            if (!select || !balanceDiv) return;
+            
+            const tokenId = select.value;
+            if (!tokenId) {
+                balanceDiv.textContent = '';
+                return;
+            }
+            
+            try {
+                let balance = 0;
+                if (tokenId === 'SHADOW') {
+                    const response = await fetch('/wallet/balance');
+                    if (response.ok) {
+                        const data = await response.json();
+                        balance = data.balance || 0;
+                    }
+                } else {
+                    const response = await fetch('/wallet/tokens');
+                    if (response.ok) {
+                        const data = await response.json();
+                        const balances = data.balances || [];
+                        const tokenBalance = balances.find(b => b.token_id === tokenId);
+                        balance = tokenBalance ? tokenBalance.balance : 0;
+                    }
+                }
+                
+                balanceDiv.textContent = 'Balance: ' + balance.toFixed(8);
+            } catch (error) {
+                console.error('Failed to load balance:', error);
+                balanceDiv.textContent = 'Balance: Error loading';
             }
         }
         

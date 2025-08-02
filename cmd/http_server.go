@@ -134,6 +134,10 @@ func (sn *ShadowNode) initializeHTTPServer() error {
 	marketplace.HandleFunc("/offers", sn.handleMarketplaceOffers).Methods("GET")
 	marketplace.HandleFunc("/create-offer", sn.handleMarketplaceCreateOffer).Methods("POST")
 	marketplace.HandleFunc("/purchase", sn.handleMarketplacePurchase).Methods("POST")
+	
+	// Liquidity pool endpoints
+	router.HandleFunc("/api/pools", sn.handlePoolsList).Methods("GET")
+	router.HandleFunc("/api/pool/create", sn.handlePoolCreate).Methods("POST")
 
 	// Add CORS middleware
 	router.Use(corsMiddleware)
@@ -1613,5 +1617,225 @@ func (sn *ShadowNode) handleMarketplacePurchase(w http.ResponseWriter, r *http.R
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// handlePoolsList returns all active liquidity pools
+func (sn *ShadowNode) handlePoolsList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Check blockchain availability
+	if sn.blockchain == nil {
+		http.Error(w, "Blockchain not available", http.StatusServiceUnavailable)
+		return
+	}
+	
+	// Get token state
+	tokenState := sn.blockchain.GetTokenState()
+	if tokenState == nil {
+		http.Error(w, "Token state not available", http.StatusServiceUnavailable)
+		return
+	}
+	
+	// Get all tokens and filter for liquidity pool NFTs
+	tokens := tokenState.GetAllTokens()
+	var pools []map[string]interface{}
+	
+	for tokenID, metadata := range tokens {
+		// Check if this is a liquidity pool NFT
+		if metadata.LiquidityPool != nil {
+			poolData := metadata.LiquidityPool
+			
+			// Get token names for display
+			var tokenAName, tokenBName string
+			if poolData.TokenA == "SHADOW" {
+				tokenAName = "SHADOW"
+			} else {
+				if tokenAMeta, exists := tokens[poolData.TokenA]; exists {
+					tokenAName = tokenAMeta.Name
+				} else {
+					tokenAName = poolData.TokenA[:8] + "..."
+				}
+			}
+			
+			if poolData.TokenB == "SHADOW" {
+				tokenBName = "SHADOW"
+			} else {
+				if tokenBMeta, exists := tokens[poolData.TokenB]; exists {
+					tokenBName = tokenBMeta.Name
+				} else {
+					tokenBName = poolData.TokenB[:8] + "..."
+				}
+			}
+			
+			pool := map[string]interface{}{
+				"id":           tokenID,
+				"name":         metadata.Name,
+				"ticker":       metadata.Ticker,
+				"token_a":      poolData.TokenA,
+				"token_b":      poolData.TokenB,
+				"token_a_name": tokenAName,
+				"token_b_name": tokenBName,
+				"initial_ratio_a": poolData.InitialRatioA,
+				"initial_ratio_b": poolData.InitialRatioB,
+				"fee_rate":     poolData.FeeRate,
+				"l_address":    poolData.LAddress,
+				"share_token_id": poolData.ShareTokenID,
+				"creator":      poolData.Creator,
+				"creation_time": poolData.CreationTime,
+			}
+			
+			pools = append(pools, pool)
+		}
+	}
+	
+	json.NewEncoder(w).Encode(pools)
+}
+
+// PoolCreateRequest represents a pool creation request
+type PoolCreateRequest struct {
+	TokenA        string  `json:"tokenA"`
+	TokenB        string  `json:"tokenB"`
+	InitialRatioA float64 `json:"initialRatioA"`
+	InitialRatioB float64 `json:"initialRatioB"`
+	FeeRate       int     `json:"feeRate"`
+	Name          string  `json:"name"`
+	Ticker        string  `json:"ticker"`
+}
+
+// handlePoolCreate creates a new liquidity pool
+func (sn *ShadowNode) handlePoolCreate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	
+	// Parse request
+	var req PoolCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	
+	// Validate request
+	if req.TokenA == "" || req.TokenB == "" {
+		http.Error(w, "Both tokens are required", http.StatusBadRequest)
+		return
+	}
+	
+	if req.TokenA == req.TokenB {
+		http.Error(w, "Token A and Token B must be different", http.StatusBadRequest)
+		return
+	}
+	
+	if req.InitialRatioA <= 0 || req.InitialRatioB <= 0 {
+		http.Error(w, "Initial ratios must be positive", http.StatusBadRequest)
+		return
+	}
+	
+	if req.Name == "" || req.Ticker == "" {
+		http.Error(w, "Pool name and ticker are required", http.StatusBadRequest)
+		return
+	}
+	
+	// Check if we have a wallet session
+	session, valid := validateSession(r)
+	if !valid || session == nil {
+		http.Error(w, "Web wallet session required", http.StatusUnauthorized)
+		return
+	}
+	
+	// For now, use a dummy wallet address from session
+	walletAddress := session.Address
+	
+	// Convert float amounts to satoshi/token units
+	initialRatioA := uint64(req.InitialRatioA * float64(SatoshisPerShadow))
+	initialRatioB := uint64(req.InitialRatioB * float64(SatoshisPerShadow))
+	
+	// If TokenB is not SHADOW, we need to adjust for its decimals
+	if req.TokenB != "SHADOW" {
+		if sn.blockchain != nil {
+			tokenState := sn.blockchain.GetTokenState()
+			if tokenState != nil {
+				if tokenMeta, exists := tokenState.GetAllTokens()[req.TokenB]; exists {
+					decimals := tokenMeta.Decimals
+					multiplier := uint64(1)
+					for i := uint8(0); i < decimals; i++ {
+						multiplier *= 10
+					}
+					initialRatioB = uint64(req.InitialRatioB * float64(multiplier))
+				}
+			}
+		}
+	}
+	
+	// Create transaction
+	tx := NewTransaction()
+	tx.AddPoolCreate(
+		req.TokenA,
+		req.TokenB,
+		initialRatioA,
+		initialRatioB,
+		uint64(req.FeeRate),
+		walletAddress,
+		req.Name,
+		req.Ticker,
+	)
+	
+	// For now, create a basic signed transaction structure since we don't have full wallet support
+	// This is a simplified version for demonstration
+	txHash, err := tx.Hash()
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to hash transaction: %v", err), http.StatusInternalServerError)
+		return
+	}
+	
+	// Generate L-address from transaction hash and update the pool data
+	lAddress := generateLAddress(txHash)
+	
+	// Update the L-address in the transaction's pool data
+	if len(tx.TokenOps) > 0 && tx.TokenOps[0].Metadata != nil && tx.TokenOps[0].Metadata.LiquidityPool != nil {
+		tx.TokenOps[0].Metadata.LiquidityPool.LAddress = lAddress
+		// Re-hash the transaction with the updated L-address
+		txHash, err = tx.Hash()
+		if err != nil {
+			http.Error(w, fmt.Sprintf("Failed to re-hash transaction with L-address: %v", err), http.StatusInternalServerError)
+			return
+		}
+	}
+	
+	// Create a simple signed transaction for submission
+	signedTx := &SignedTransaction{
+		TxHash:    txHash,
+		Algorithm: "demo", // Simplified for demo
+		SignerKey: walletAddress,
+	}
+	
+	// Marshal the transaction
+	txData, err := json.Marshal(tx)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to marshal transaction: %v", err), http.StatusInternalServerError)
+		return
+	}
+	signedTx.Transaction = json.RawMessage(txData)
+	
+	// Submit transaction
+	if sn.mempool == nil {
+		http.Error(w, "Mempool not available", http.StatusServiceUnavailable)
+		return
+	}
+	
+	err = sn.mempool.AddTransaction(signedTx, SourceAPI)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to submit transaction: %v", err), http.StatusBadRequest)
+		return
+	}
+	
+	response := map[string]interface{}{
+		"success":     true,
+		"message":     "Pool created successfully",
+		"tx_hash":     signedTx.TxHash,
+		"l_address":   lAddress,
+		"pool_name":   req.Name,
+		"token_pair":  req.TokenA + "/" + req.TokenB,
+	}
+	
 	json.NewEncoder(w).Encode(response)
 }

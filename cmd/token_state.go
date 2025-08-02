@@ -549,3 +549,36 @@ func (ts *TokenState) GetTokenBalances(tokenID string) map[string]uint64 {
 	
 	return result
 }
+
+// ResetToGenesis resets the token state to genesis (empty) state
+func (ts *TokenState) ResetToGenesis() error {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	
+	log.Printf("🔄 [TOKEN_STATE] Resetting token state to genesis...")
+	
+	// Clear all in-memory state
+	ts.tokens = make(map[string]*TokenMetadata)
+	ts.balances = make(map[string]map[string]uint64)
+	ts.lockedShadow = make(map[string]uint64)
+	
+	// Remove entire token data directory and recreate it clean
+	log.Printf("🗑️ [TOKEN_STATE] Removing entire token data directory: %s", ts.dataDir)
+	if err := os.RemoveAll(ts.dataDir); err != nil {
+		log.Printf("⚠️ [TOKEN_STATE] Failed to remove token data directory: %v", err)
+	}
+	
+	// Recreate the data directory
+	if err := os.MkdirAll(ts.dataDir, 0755); err != nil {
+		return fmt.Errorf("failed to recreate token data directory: %w", err)
+	}
+	log.Printf("📁 [TOKEN_STATE] Recreated clean token data directory")
+	
+	// Save the empty state to disk (creates new clean file)
+	if err := ts.saveState(); err != nil {
+		return fmt.Errorf("failed to save reset token state: %w", err)
+	}
+	
+	log.Printf("✅ [TOKEN_STATE] Token state reset to genesis complete")
+	return nil
+}

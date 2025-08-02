@@ -811,6 +811,214 @@ func (bc *Blockchain) loadBlockchain() error {
 		}
 	}
 	
+	// Validate chain integrity and trim invalid blocks
+	if err := bc.validateAndTrimChain(); err != nil {
+		return fmt.Errorf("failed to validate blockchain: %w", err)
+	}
+	
+	return nil
+}
+
+// validateAndTrimChain validates the blockchain integrity and trims invalid blocks
+func (bc *Blockchain) validateAndTrimChain() error {
+	log.Printf("🔍 [BLOCKCHAIN] Validating chain integrity...")
+	
+	if bc.tipHeight == 0 {
+		log.Printf("✅ [BLOCKCHAIN] Only genesis block present, validation complete")
+		return nil
+	}
+	
+	var lastValidHeight uint64 = 0
+	var lastValidHash string = ""
+	
+	// Get genesis block as starting point
+	genesisBlock, exists := bc.blocksByHeight[0]
+	if !exists {
+		return fmt.Errorf("genesis block not found")
+	}
+	lastValidHash = genesisBlock.Hash()
+	lastValidHeight = 0
+	
+	log.Printf("📊 [BLOCKCHAIN] Validating chain from height 0 to %d", bc.tipHeight)
+	
+	// Walk through each block sequentially
+	for height := uint64(1); height <= bc.tipHeight; height++ {
+		currentBlock, exists := bc.blocksByHeight[height]
+		if !exists {
+			log.Printf("⚠️  [BLOCKCHAIN] Block at height %d missing, trimming chain", height)
+			break
+		}
+		
+		currentHash := currentBlock.Hash()
+		expectedParent := lastValidHash
+		actualParent := currentBlock.Header.PreviousBlockHash
+		
+		if actualParent != expectedParent {
+			log.Printf("❌ [BLOCKCHAIN] Invalid parent-child relationship at height %d", height)
+			log.Printf("   Block hash: %s", currentHash[:16]+"...")
+			log.Printf("   Expected parent: %s", expectedParent[:16]+"...")
+			log.Printf("   Actual parent:   %s", actualParent[:16]+"...")
+			log.Printf("✂️  [BLOCKCHAIN] Trimming invalid blocks from height %d onwards", height)
+			break
+		}
+		
+		// Block is valid
+		lastValidHeight = height
+		lastValidHash = currentHash
+		log.Printf("✅ [BLOCKCHAIN] Block %d valid (parent: %s)", height, expectedParent[:16]+"...")
+	}
+	
+	// If we found invalid blocks, trim them
+	if lastValidHeight < bc.tipHeight {
+		log.Printf("🔧 [BLOCKCHAIN] Trimming blockchain from height %d to %d", lastValidHeight+1, bc.tipHeight)
+		
+		if err := bc.TrimBlocksFromHeight(lastValidHeight + 1); err != nil {
+			return fmt.Errorf("failed to trim invalid blocks: %w", err)
+		}
+		
+		log.Printf("✅ [BLOCKCHAIN] Chain validation complete, trimmed to height %d", lastValidHeight)
+	} else {
+		log.Printf("✅ [BLOCKCHAIN] Chain validation complete, all %d blocks valid", bc.tipHeight+1)
+	}
+	
+	return nil
+}
+
+// DeleteBlock removes a block from both memory and disk storage
+func (bc *Blockchain) DeleteBlock(block *Block) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	
+	hash := block.Hash()
+	height := block.Header.Height
+	
+	// Remove from memory
+	delete(bc.blocks, hash)
+	delete(bc.blocksByHeight, height)
+	
+	// Remove from disk
+	blockPath := filepath.Join(bc.dataDir, "blocks", hash+".json")
+	if err := os.Remove(blockPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete block file %s: %w", blockPath, err)
+	}
+	
+	log.Printf("🗑️ [BLOCKCHAIN] Deleted block at height %d, hash %s", height, hash[:16]+"...")
+	return nil
+}
+
+// TrimBlocksFromHeight removes all blocks from the specified height onwards
+func (bc *Blockchain) TrimBlocksFromHeight(fromHeight uint64) error {
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	
+	log.Printf("✂️ [BLOCKCHAIN] Trimming blocks from height %d onwards", fromHeight)
+	
+	var blocksToDelete []*Block
+	
+	// Find all blocks to delete
+	for height := fromHeight; height <= bc.tipHeight; height++ {
+		if block, exists := bc.blocksByHeight[height]; exists {
+			blocksToDelete = append(blocksToDelete, block)
+		}
+	}
+	
+	// Delete each block
+	for _, block := range blocksToDelete {
+		hash := block.Hash()
+		height := block.Header.Height
+		
+		// Remove from memory
+		delete(bc.blocks, hash)
+		delete(bc.blocksByHeight, height)
+		
+		// Remove from disk
+		blockPath := filepath.Join(bc.dataDir, "blocks", hash+".json")
+		if err := os.Remove(blockPath); err != nil && !os.IsNotExist(err) {
+			log.Printf("Warning: failed to delete block file %s: %v", blockPath, err)
+		}
+	}
+	
+	// Update tip to the block before the trimmed range
+	if fromHeight > 0 {
+		newTipHeight := fromHeight - 1
+		if newTipBlock, exists := bc.blocksByHeight[newTipHeight]; exists {
+			bc.tipHeight = newTipHeight
+			bc.tipHash = newTipBlock.Hash()
+			log.Printf("📍 [BLOCKCHAIN] Updated tip to height %d, hash %s", bc.tipHeight, bc.tipHash[:16]+"...")
+		}
+	} else {
+		// Trimming from genesis - this shouldn't happen in normal operation
+		bc.tipHeight = 0
+		bc.tipHash = ""
+		log.Printf("⚠️ [BLOCKCHAIN] Warning: trimmed to genesis")
+	}
+	
+	log.Printf("✂️ [BLOCKCHAIN] Trimmed %d blocks, new tip height: %d", len(blocksToDelete), bc.tipHeight)
+	
+	// Reset token state if we trimmed back to early blocks
+	// Any trim operation could affect token state, so reset to be safe
+	if bc.tokenState != nil {
+		log.Printf("🔄 [BLOCKCHAIN] Resetting token state after block trimming...")
+		if err := bc.tokenState.ResetToGenesis(); err != nil {
+			log.Printf("⚠️ [BLOCKCHAIN] Failed to reset token state: %v", err)
+			// Don't fail the trim operation, but log the warning
+		}
+		
+		// Rebuild token state from remaining blocks
+		log.Printf("🔄 [BLOCKCHAIN] Rebuilding token state from remaining blocks...")
+		if err := bc.rebuildTokenState(); err != nil {
+			log.Printf("⚠️ [BLOCKCHAIN] Failed to rebuild token state: %v", err)
+		}
+	}
+	
+	return nil
+}
+
+// rebuildTokenState rebuilds the token state by replaying all blocks from genesis
+func (bc *Blockchain) rebuildTokenState() error {
+	if bc.tokenState == nil || bc.tokenExecutor == nil {
+		return fmt.Errorf("token state or executor not initialized")
+	}
+	
+	log.Printf("🏗️ [BLOCKCHAIN] Rebuilding token state from %d blocks...", bc.tipHeight+1)
+	
+	// Process blocks in order from height 1 to current tip
+	for height := uint64(1); height <= bc.tipHeight; height++ {
+		block, exists := bc.blocksByHeight[height]
+		if !exists {
+			log.Printf("⚠️ [BLOCKCHAIN] Missing block at height %d during token state rebuild", height)
+			continue
+		}
+		
+		log.Printf("🔄 [BLOCKCHAIN] Replaying token operations from block %d", height)
+		
+		// Process each transaction in the block
+		for txIndex, signedTx := range block.Body.Transactions {
+			// Parse the transaction
+			var tx Transaction
+			if err := json.Unmarshal(signedTx.Transaction, &tx); err != nil {
+				log.Printf("⚠️ [BLOCKCHAIN] Failed to parse transaction %d in block %d: %v", txIndex, height, err)
+				continue
+			}
+			
+			// Execute token operations if any
+			if len(tx.TokenOps) > 0 {
+				log.Printf("🪙 [BLOCKCHAIN] Executing %d token operations from block %d, tx %d", len(tx.TokenOps), height, txIndex)
+				result, err := bc.tokenExecutor.ExecuteTokenOperations(&tx)
+				if err != nil {
+					log.Printf("⚠️ [BLOCKCHAIN] Failed to execute token operations in block %d, tx %d: %v", height, txIndex, err)
+					// Continue with other transactions even if one fails
+					continue
+				}
+				
+				if !result.Success {
+					log.Printf("⚠️ [BLOCKCHAIN] Token operations failed in block %d, tx %d: %s", height, txIndex, result.Error)
+				}
+			}
+		}
+	}
+	
+	log.Printf("✅ [BLOCKCHAIN] Token state rebuild complete")
 	return nil
 }
 

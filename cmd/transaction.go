@@ -46,6 +46,7 @@ const (
 	TRADE_OFFER                     // Create a trade offer (locks asset in NFT)
 	TRADE_EXECUTE                   // Execute/accept a trade offer
 	SYNDICATE_JOIN                  // Join a mining syndicate (creates membership NFT)
+	POOL_CREATE                     // Create a new liquidity pool NFT
 )
 
 // String returns the string representation of TokenOpType
@@ -63,6 +64,8 @@ func (t TokenOpType) String() string {
 		return "TRADE_EXECUTE"
 	case SYNDICATE_JOIN:
 		return "SYNDICATE_JOIN"
+	case POOL_CREATE:
+		return "POOL_CREATE"
 	default:
 		return "UNKNOWN"
 	}
@@ -90,6 +93,7 @@ type TokenMetadata struct {
 	URI          string          `json:"uri,omitempty"` // Optional URI for metadata/NFT content (max 128 chars)
 	TradeOffer   *TradeOfferData `json:"trade_offer,omitempty"` // Trade offer data for marketplace NFTs
 	Syndicate    *SyndicateData  `json:"syndicate,omitempty"`   // Syndicate membership data for mining pool NFTs
+	LiquidityPool *LiquidityPoolData `json:"liquidity_pool,omitempty"` // Liquidity pool data
 }
 
 // TradeOfferData contains the details of a trade offer locked in an NFT
@@ -158,6 +162,19 @@ type SyndicateData struct {
 	JoinTime         int64         `json:"join_time"`         // Unix timestamp when NFT was minted
 	ExpirationTime   int64         `json:"expiration_time"`   // Unix timestamp when NFT expires (8 days max)
 	RenewalCount     uint32        `json:"renewal_count"`     // How many times this membership has been renewed
+}
+
+// LiquidityPoolData contains the details of a liquidity pool NFT
+type LiquidityPoolData struct {
+	TokenA         string `json:"token_a"`          // First token ID in the pair (or "SHADOW")
+	TokenB         string `json:"token_b"`          // Second token ID in the pair (or "SHADOW") 
+	InitialRatioA  uint64 `json:"initial_ratio_a"`  // Initial amount of token A (defines k constant)
+	InitialRatioB  uint64 `json:"initial_ratio_b"`  // Initial amount of token B (defines k constant)
+	FeeRate        uint64 `json:"fee_rate"`         // Fee rate in basis points (e.g., 30 = 0.3%)
+	LAddress       string `json:"l_address"`        // Pool's L-address (computed deterministically)
+	ShareTokenID   string `json:"share_token_id"`   // Pool share token ID (owned by L-address)
+	Creator        string `json:"creator"`          // Pool creator address
+	CreationTime   int64  `json:"creation_time"`    // Unix timestamp of creation
 }
 
 // JOSEHeader provides JOSE-style header information
@@ -366,6 +383,51 @@ func (tx *Transaction) AddSyndicateJoin(syndicate SyndicateType, minerAddress st
 		Amount:   1, // NFT amount
 		From:     minerAddress, // Miner pays the fee
 		To:       minerAddress, // Syndicate NFT goes to miner
+		Metadata: metadata,
+	}
+	
+	tx.AddTokenOperation(tokenOp)
+}
+
+// AddPoolCreate creates a new liquidity pool NFT with L-address
+func (tx *Transaction) AddPoolCreate(tokenA, tokenB string, initialRatioA, initialRatioB uint64, feeRate uint64, creator, name, ticker string) {
+	// Generate pool NFT ID
+	poolNFTID := generateTokenID(name, ticker, creator, tx.Timestamp)
+	
+	// Generate share token ID for this pool (high melt value for maximum shares)
+	shareTokenID := generateTokenID(name+" Shares", ticker+"_SHARE", creator, tx.Timestamp) 
+	
+	// Create liquidity pool data (L-address will be computed after transaction creation)
+	poolData := &LiquidityPoolData{
+		TokenA:         tokenA,
+		TokenB:         tokenB,
+		InitialRatioA:  initialRatioA,
+		InitialRatioB:  initialRatioB,
+		FeeRate:        feeRate,
+		LAddress:       "", // Will be computed deterministically from this transaction
+		ShareTokenID:   shareTokenID,
+		Creator:        creator,
+		CreationTime:   tx.Timestamp.Unix(),
+	}
+	
+	// Create NFT metadata for the pool
+	metadata := &TokenMetadata{
+		Name:         name,
+		Ticker:       ticker,
+		TotalSupply:  1, // Pool NFT (single instance)
+		Decimals:     0, // NFT
+		LockAmount:   500000000, // 5 SHADOW pool creation fee (high cost for permanent infrastructure)
+		Creator:      creator,
+		CreationTime: tx.Timestamp.Unix(),
+		LiquidityPool: poolData,
+	}
+	
+	tokenOp := TokenOperation{
+		Type:     POOL_CREATE,
+		TokenID:  poolNFTID,
+		Amount:   1, // Pool NFT amount
+		From:     creator,
+		To:       creator, // Pool NFT goes to creator
 		Metadata: metadata,
 	}
 	
@@ -716,6 +778,22 @@ func generateTokenID(name, ticker, creator string, timestamp time.Time) string {
 	shake.Read(hash)
 	
 	return hex.EncodeToString(hash)
+}
+
+// generateLAddress creates an L-address from a pool creation transaction
+func generateLAddress(txHash string) string {
+	// L-addresses start with 'L' instead of 'S' and are derived from the pool creation transaction
+	// This ensures the L-address is deterministic and tied to the pool creation
+	
+	// Use SHAKE256 for quantum resistance
+	hash := make([]byte, 32)
+	shake := sha3.NewShake256()
+	shake.Write([]byte("L-ADDRESS:" + txHash))
+	shake.Read(hash)
+	
+	// Convert to base58 or similar encoding and prefix with 'L'
+	// For now, use hex encoding with L prefix
+	return "L" + hex.EncodeToString(hash)[:40] // 40 chars to match typical address length
 }
 
 // validateTokenOperation validates a single token operation

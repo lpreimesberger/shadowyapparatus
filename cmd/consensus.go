@@ -10,6 +10,7 @@ import (
     "io"
     "log"
     "net"
+    "strings"
     "sync"
     "time"
 )
@@ -232,6 +233,191 @@ func NewConsensusEngine(config *ConsensusConfig, blockchain *Blockchain, mempool
     return engine
 }
 
+func (ce *ConsensusEngine) SyncFirst() error {
+    log.Printf("🚀 [SYNC-FIRST] Starting initial sync before farming/mining...")
+    
+    // Set flag to indicate SyncFirst is running (to prevent interference with normal sync)
+    ce.statusMutex.Lock()
+    ce.syncStatus.IsSyncing = true
+    ce.statusMutex.Unlock()
+    // Stop all farming/mining first to prevent race conditions
+    if ce.miner != nil && ce.miner.IsRunning() {
+        log.Printf("⏸️  [SYNC-FIRST] Stopping miner for initial sync...")
+        if err := ce.miner.Stop(); err != nil {
+            log.Printf("❌ [SYNC-FIRST] Failed to stop miner: %v", err)
+        } else {
+            log.Printf("✅ [SYNC-FIRST] Miner stopped")
+        }
+    }
+
+    // Get current blockchain state
+    currentTip, err := ce.blockchain.GetTip()
+    if err != nil {
+        return fmt.Errorf("failed to get current tip: %w", err)
+    }
+
+    currentHeight := currentTip.Header.Height
+    log.Printf("📊 [SYNC-FIRST] Current blockchain state: height=%d, tip=%s",
+        currentHeight, currentTip.Hash()[:16]+"...")
+
+    // Wait for peers to connect
+    maxWaitTime := 30 * time.Second
+    waitStart := time.Now()
+
+    for time.Since(waitStart) < maxWaitTime {
+        ce.peersMutex.RLock()
+        peerCount := len(ce.peers)
+        ce.peersMutex.RUnlock()
+
+        if peerCount > 0 {
+            log.Printf("✅ [SYNC-FIRST] Found %d peers, proceeding with sync", peerCount)
+            break
+        }
+
+        log.Printf("⏳ [SYNC-FIRST] Waiting for peers... (%v elapsed)", time.Since(waitStart))
+        time.Sleep(2 * time.Second)
+    }
+
+    // Find best peer
+    bestPeer := ce.findBestPeer()
+    if bestPeer == nil {
+        log.Printf("⚠️  [SYNC-FIRST] No peers available for sync, continuing with local chain")
+        return nil
+    }
+
+    log.Printf("🎯 [SYNC-FIRST] Best peer: %s (height %d)", bestPeer.ID, bestPeer.ChainHeight)
+
+    // Check if we need to sync
+    if bestPeer.ChainHeight <= currentHeight {
+        log.Printf("✅ [SYNC-FIRST] Local chain is up to date (height %d >= peer height %d)",
+            currentHeight, bestPeer.ChainHeight)
+        return nil
+    }
+
+    log.Printf("🔄 [SYNC-FIRST] Need to sync: local height %d < peer height %d",
+        currentHeight, bestPeer.ChainHeight)
+
+    // Reset sync state to match our actual blockchain state
+    nextHeight := currentHeight + 1
+    ce.syncMutex.Lock()
+    ce.nextExpectedHeight = nextHeight
+    ce.pendingBlocks = make(map[uint64]*Block) // Clear any stale pending blocks
+    ce.syncMutex.Unlock()
+    
+    log.Printf("🔧 [SYNC-FIRST] Reset nextExpectedHeight to %d to match blockchain state", nextHeight)
+
+    // Perform initial sync using simple sequential approach
+    targetHeight := bestPeer.ChainHeight
+
+    log.Printf("🔍 [SYNC-FIRST] Starting sequential sync from height %d to %d", nextHeight, targetHeight)
+
+    for nextHeight <= targetHeight {
+        log.Printf("📥 [SYNC-FIRST] Loop iteration: requesting block %d from peer %s (target: %d)", nextHeight, bestPeer.ID, targetHeight)
+
+        // Request block
+        ce.requestBlocksFromPeer(bestPeer, nextHeight, nextHeight)
+
+        // Wait for block with timeout
+        maxWait := 10 * time.Second
+        waitStart := time.Now()
+        var block *Block
+
+        for time.Since(waitStart) < maxWait {
+            ce.syncMutex.Lock()
+            receivedBlock, exists := ce.pendingBlocks[nextHeight]
+            if exists {
+                // Remove it immediately to prevent interference with normal sync
+                delete(ce.pendingBlocks, nextHeight)
+                block = receivedBlock
+            }
+            ce.syncMutex.Unlock()
+
+            if block != nil {
+                break
+            }
+            time.Sleep(100 * time.Millisecond)
+        }
+
+        if block == nil {
+            log.Printf("⏰ [SYNC-FIRST] Timeout waiting for block %d, retrying...", nextHeight)
+            continue
+        }
+
+        // Try to add block
+        log.Printf("➕ [SYNC-FIRST] Adding block %d (hash: %s)", nextHeight, block.Hash()[:16]+"...")
+
+        if err := ce.blockchain.AddBlock(block); err != nil {
+            log.Printf("❌ [SYNC-FIRST] Failed to add block %d: %v", nextHeight, err)
+
+            // If it's a previous block not found error, we have a fork
+            if strings.Contains(err.Error(), "previous block not found") {
+                log.Printf("🍴 [SYNC-FIRST] Fork detected at block %d, need to roll back", nextHeight)
+
+                // Simple rollback: go back 6 blocks or to genesis
+                rollbackHeight := currentHeight
+                if currentHeight >= 6 {
+                    rollbackHeight = currentHeight - 6
+                } else {
+                    rollbackHeight = 0
+                }
+
+                log.Printf("⬅️  [SYNC-FIRST] Rolling back to height %d", rollbackHeight)
+
+                if err := ce.blockchain.TrimBlocksFromHeight(rollbackHeight); err != nil {
+                    return fmt.Errorf("failed to rollback blockchain: %w", err)
+                }
+
+                // Update current state
+                newTip, err := ce.blockchain.GetTip()
+                if err != nil {
+                    return fmt.Errorf("failed to get tip after rollback: %w", err)
+                }
+
+                currentHeight = newTip.Header.Height
+                nextHeight = currentHeight + 1
+
+                // Clear pending blocks and update nextExpectedHeight
+                ce.syncMutex.Lock()
+                ce.pendingBlocks = make(map[uint64]*Block)
+                ce.nextExpectedHeight = nextHeight
+                ce.syncMutex.Unlock()
+
+                log.Printf("🔄 [SYNC-FIRST] Continuing from height %d after rollback", nextHeight)
+                continue
+            } else {
+                return fmt.Errorf("failed to add block %d: %w", nextHeight, err)
+            }
+        }
+
+        // Successfully added block
+        currentHeight = nextHeight
+        nextHeight++
+        
+        // Update nextExpectedHeight to match our progress (don't restore to old value)
+        ce.syncMutex.Lock()
+        ce.nextExpectedHeight = nextHeight
+        log.Printf("🔧 [SYNC-FIRST] Updated nextExpectedHeight to %d after successfully adding block %d", nextHeight, currentHeight)
+        ce.syncMutex.Unlock()
+
+        if nextHeight%10 == 0 || nextHeight == targetHeight {
+            log.Printf("📈 [SYNC-FIRST] Progress: %d/%d (%.1f%%)",
+                currentHeight, targetHeight, float64(currentHeight)/float64(targetHeight)*100)
+        }
+        
+        log.Printf("🔄 [SYNC-FIRST] End of loop iteration: nextHeight=%d, targetHeight=%d, continuing=%v", 
+            nextHeight, targetHeight, nextHeight <= targetHeight)
+    }
+
+    log.Printf("🎉 [SYNC-FIRST] Initial sync completed! Final height: %d", currentHeight)
+
+    // Clear sync flag
+    ce.statusMutex.Lock()
+    ce.syncStatus.IsSyncing = false
+    ce.statusMutex.Unlock()
+
+    return nil
+}
+
 // Start starts the consensus engine
 func (ce *ConsensusEngine) Start() error {
     log.Printf("Starting consensus engine on %s", ce.listenAddr)
@@ -277,6 +463,7 @@ func (ce *ConsensusEngine) Start() error {
     }
 
     log.Printf("Consensus engine started with Node ID: %s", ce.nodeID)
+    ce.SyncFirst()
     return nil
 }
 
@@ -426,12 +613,12 @@ func (ce *ConsensusEngine) ConnectToPeer(address string) error {
 func (ce *ConsensusEngine) isConnectionRecentlyFailed(address string) bool {
     ce.failedConnectionsMutex.RLock()
     defer ce.failedConnectionsMutex.RUnlock()
-    
+
     lastFailure, exists := ce.failedConnections[address]
     if !exists {
         return false
     }
-    
+
     // Consider a connection recently failed if it failed within the last 5 minutes
     return time.Since(lastFailure) < 5*time.Minute
 }
@@ -440,7 +627,7 @@ func (ce *ConsensusEngine) isConnectionRecentlyFailed(address string) bool {
 func (ce *ConsensusEngine) markConnectionFailed(address string) {
     ce.failedConnectionsMutex.Lock()
     defer ce.failedConnectionsMutex.Unlock()
-    
+
     ce.failedConnections[address] = time.Now()
 }
 
@@ -448,7 +635,7 @@ func (ce *ConsensusEngine) markConnectionFailed(address string) {
 func (ce *ConsensusEngine) markConnectionSuccessful(address string) {
     ce.failedConnectionsMutex.Lock()
     defer ce.failedConnectionsMutex.Unlock()
-    
+
     delete(ce.failedConnections, address)
 }
 
@@ -478,7 +665,7 @@ func (ce *ConsensusEngine) connectToPeerWithNATTraversal(address string, clientE
             _, p2pPort, err := net.SplitHostPort(address)
             if err == nil {
                 clientP2PAddr := clientIP + ":" + p2pPort
-                
+
                 // Check if we recently failed to connect to this address
                 if ce.isConnectionRecentlyFailed(clientP2PAddr) {
                     log.Printf("🚫 [NAT] Skipping recently failed client address: %s", clientP2PAddr)

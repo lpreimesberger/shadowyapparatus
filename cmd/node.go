@@ -693,6 +693,9 @@ var nodeCmd = &cobra.Command{
 			log.Printf("🚀 Development mode enabled - fast block mining activated!")
 		}
 		
+		// Set tracker URL from global flag
+		config.ConsensusConfig.TrackerURL = TrackerURL
+		
 		// Allocate available ports if not explicitly set
 		preferredHTTP := config.HTTPPort
 		preferredGRPC := config.GRPCPort

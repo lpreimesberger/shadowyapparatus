@@ -75,6 +75,8 @@ func (te *TokenExecutor) executeTokenOperation(tokenOp TokenOperation, index int
 		return te.executeTradeExecute(tokenOp, index)
 	case SYNDICATE_JOIN:
 		return te.executeSyndicateJoin(tokenOp, index)
+	case POOL_CREATE:
+		return te.executePoolCreate(tokenOp, index)
 	default:
 		return nil, fmt.Errorf("unknown token operation type: %d", tokenOp.Type)
 	}
@@ -414,6 +416,65 @@ func (te *TokenExecutor) executeSyndicateJoin(tokenOp TokenOperation, index int)
 		From:          tokenOp.From,
 		To:            tokenOp.To,
 		ShadowLocked:  tokenOp.Metadata.LockAmount, // NFT creation fee (0.1 SHADOW)
+		ShadowReleased: 0,
+		Success:       true,
+	}, nil
+}
+
+// executePoolCreate processes a liquidity pool creation operation
+func (te *TokenExecutor) executePoolCreate(tokenOp TokenOperation, index int) (*TokenOpResult, error) {
+	log.Printf("🔍 [TOKEN_EXECUTOR] Creating liquidity pool: %s", tokenOp.TokenID)
+	
+	if tokenOp.Metadata == nil || tokenOp.Metadata.LiquidityPool == nil {
+		return nil, fmt.Errorf("POOL_CREATE operation missing pool data")
+	}
+	
+	poolData := tokenOp.Metadata.LiquidityPool
+	log.Printf("🔍 [TOKEN_EXECUTOR] Pool data: %s/%s, ratio=%d:%d, fee=%d", 
+		poolData.TokenA, poolData.TokenB, poolData.InitialRatioA, poolData.InitialRatioB, poolData.FeeRate)
+	
+	// Generate L-address from the transaction hash (we need the tx hash for this)
+	// For now, we'll leave it empty and populate it in the HTTP handler
+	// The L-address should be set by the caller before creating the transaction
+	
+	// Create the pool NFT in the state
+	err := te.tokenState.CreateToken(tokenOp.TokenID, tokenOp.Metadata)
+	if err != nil {
+		log.Printf("❌ [TOKEN_EXECUTOR] Failed to create pool NFT: %v", err)
+		return nil, fmt.Errorf("failed to create pool NFT: %w", err)
+	}
+	
+	// Create the share token with high melt value
+	if poolData.ShareTokenID != "" {
+		shareMetadata := &TokenMetadata{
+			Name:         tokenOp.Metadata.Name + " Shares",
+			Ticker:       tokenOp.Metadata.Ticker + "_SHARE",
+			TotalSupply:  1000000000000, // 1 trillion shares initially (high precision)
+			Decimals:     8,             // 8 decimal places for precision
+			LockAmount:   1000000000,    // 10 SHADOW per share (high melt value)
+			Creator:      poolData.LAddress, // Shares owned by L-address
+			CreationTime: tokenOp.Metadata.CreationTime,
+		}
+		
+		err = te.tokenState.CreateToken(poolData.ShareTokenID, shareMetadata)
+		if err != nil {
+			log.Printf("❌ [TOKEN_EXECUTOR] Failed to create share token: %v", err)
+			return nil, fmt.Errorf("failed to create share token: %w", err)
+		}
+		log.Printf("✅ [TOKEN_EXECUTOR] Created share token: %s", poolData.ShareTokenID)
+	}
+	
+	log.Printf("✅ [TOKEN_EXECUTOR] Liquidity pool created: %s (%s/%s)", 
+		tokenOp.TokenID, poolData.TokenA, poolData.TokenB)
+	
+	return &TokenOpResult{
+		Index:         index,
+		Type:          POOL_CREATE,
+		TokenID:       tokenOp.TokenID,
+		Amount:        tokenOp.Amount,
+		From:          tokenOp.From,
+		To:            tokenOp.To,
+		ShadowLocked:  tokenOp.Metadata.LockAmount, // Pool creation fee (5.0 SHADOW)
 		ShadowReleased: 0,
 		Success:       true,
 	}, nil

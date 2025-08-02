@@ -285,9 +285,27 @@ func (ce *ConsensusEngine) handleChainResponse(peer *Peer, message *P2PMessage) 
     }
 
     if chainState.Height > currentTip.Header.Height {
-        log.Printf("🚨 [CONSENSUS] Peer %s has longer chain: %d vs our %d - implementing longest chain rule",
-            peer.ID, chainState.Height, currentTip.Header.Height)
-        ce.handleLongerChain(peer, &chainState)
+        // Check if we're already syncing - don't start reorganization if sync is in progress
+        ce.statusMutex.RLock()
+        isSyncing := ce.syncStatus.IsSyncing
+        ce.statusMutex.RUnlock()
+        
+        if isSyncing {
+            log.Printf("🔄 [CONSENSUS] Peer %s has longer chain but sync already in progress - letting sync continue",
+                peer.ID)
+            return nil
+        }
+        
+        // If we're at genesis (height 0), use normal sync instead of reorganization
+        if currentTip.Header.Height == 0 {
+            log.Printf("🚀 [CONSENSUS] Fresh node sync: peer %s has height %d vs our genesis - starting normal sync",
+                peer.ID, chainState.Height)
+            ce.performSync()
+        } else {
+            log.Printf("🚨 [CONSENSUS] Peer %s has longer chain: %d vs our %d - implementing longest chain rule",
+                peer.ID, chainState.Height, currentTip.Header.Height)
+            ce.handleLongerChain(peer, &chainState)
+        }
     }
 
     return nil
@@ -422,6 +440,38 @@ func (ce *ConsensusEngine) processBlockSequentially(block *Block) {
             log.Printf("⚠️  Block %d appears to be duplicate, advancing nextExpectedHeight to avoid sync loop", 
                 block.Header.Height)
             ce.nextExpectedHeight = block.Header.Height + 1
+        } else if strings.Contains(err.Error(), "previous block not found") {
+            // During sequential sync, let the sequential sync logic handle forks/missing blocks
+            ce.statusMutex.RLock()
+            isSyncing := ce.syncStatus.IsSyncing
+            ce.statusMutex.RUnlock()
+            
+            if isSyncing {
+                log.Printf("🔍 [SEQUENTIAL-SYNC] Block %d failed due to missing previous block during sync - sequential sync needs to trim/reset", 
+                    block.Header.Height)
+                // During sequential sync, this means we need to go back further
+                // Don't keep the nextExpectedHeight - let it stay as-is so sequential sync can detect this failure
+                log.Printf("⚠️  Sequential sync will detect this validation failure and handle it")
+                
+                // Actually, we should advance nextExpectedHeight to allow sequential sync to continue its loop
+                // The sequential sync will detect the AddBlock failure and handle the fork
+                ce.nextExpectedHeight = block.Header.Height + 1
+            } else {
+                // Handle missing previous block by requesting it from peers (only when not in sequential sync)
+                log.Printf("🔍 Block %d failed due to missing previous block: %s", 
+                    block.Header.Height, block.Header.PreviousBlockHash)
+                
+                // Request the missing previous block from best peer
+                if bestPeer := ce.findBestPeer(); bestPeer != nil {
+                    log.Printf("🔄 Requesting missing previous block for height %d from peer %s", 
+                        block.Header.Height-1, bestPeer.ID)
+                    ce.requestBlocksFromPeer(bestPeer, block.Header.Height-1, block.Header.Height-1)
+                }
+                
+                // Don't advance nextExpectedHeight so we'll retry this block later
+                log.Printf("⚠️  Keeping nextExpectedHeight=%d to retry block %d after getting missing previous block", 
+                    ce.nextExpectedHeight, block.Header.Height)
+            }
         } else {
             // For other errors (validation, storage), don't advance to prevent skipping blocks
             log.Printf("⚠️  Block %d processing failed with non-duplicate error, keeping nextExpectedHeight=%d", 
@@ -618,6 +668,16 @@ func (ce *ConsensusEngine) performSync() {
             ce.syncStatus.IsSyncing = false
         }
         ce.statusMutex.Unlock()
+        
+        // Restart mining after successful sync
+        if ce.miner != nil && !ce.miner.IsRunning() {
+            log.Printf("🔨 [CONSENSUS] Restarting miner after sync completion...")
+            if err := ce.miner.Start(); err != nil {
+                log.Printf("❌ [CONSENSUS] Failed to restart miner after sync: %v", err)
+            } else {
+                log.Printf("✅ [CONSENSUS] Miner restarted after sync")
+            }
+        }
         return
     }
 
@@ -630,22 +690,65 @@ func (ce *ConsensusEngine) performSync() {
     currentHeight := currentTip.Header.Height
 
     if isSyncing {
-        if currentHeight > lastHeight {
+        // Check if sync has been stalled for too long
+        ce.statusMutex.RLock()
+        lastSyncTime := ce.syncStatus.LastSyncTime
+        ce.statusMutex.RUnlock()
+        
+        syncStallTimeout := 2 * time.Minute // 2 minutes without progress (reduced for testing)
+        if time.Since(lastSyncTime) > syncStallTimeout && currentHeight <= lastHeight {
+            log.Printf("⚠️  [CONSENSUS] Sync appears stalled - no progress for %v (height %d). Resetting sync status",
+                time.Since(lastSyncTime), currentHeight)
+            
+            ce.statusMutex.Lock()
+            ce.syncStatus.IsSyncing = false
+            ce.statusMutex.Unlock()
+            
+            // Restart mining after stalled sync reset
+            if ce.miner != nil && !ce.miner.IsRunning() {
+                log.Printf("🔨 [CONSENSUS] Restarting miner after stalled sync reset...")
+                if err := ce.miner.Start(); err != nil {
+                    log.Printf("❌ [CONSENSUS] Failed to restart miner after stall reset: %v", err)
+                } else {
+                    log.Printf("✅ [CONSENSUS] Miner restarted after stall reset")
+                }
+            }
+            
+            // Continue to start a fresh sync below (which will stop miner again)
+        } else if currentHeight > lastHeight {
             // Making progress, update status
             ce.statusMutex.Lock()
             ce.syncStatus.CurrentHeight = currentHeight
             ce.syncStatus.SyncProgress = float64(currentHeight-lastHeight) / float64(bestPeer.ChainHeight-lastHeight)
+            ce.syncStatus.LastSyncTime = time.Now().UTC() // Update last progress time
             ce.statusMutex.Unlock()
             log.Printf("🔄 Sync progress: %d/%d (%.1f%%)",
                 currentHeight, bestPeer.ChainHeight, ce.syncStatus.SyncProgress*100)
+            
+            // Don't start new sync if making progress
+            return
+        } else {
+            // No progress but within timeout, continue waiting
+            timeWaiting := time.Since(lastSyncTime)
+            log.Printf("🔄 Sync in progress: %d/%d (%.1f%%) - waiting %v (timeout in %v)",
+                currentHeight, bestPeer.ChainHeight, ce.syncStatus.SyncProgress*100,
+                timeWaiting, syncStallTimeout-timeWaiting)
+            return
         }
-
-        // Don't start new sync if already in progress
-        return
     }
 
     log.Printf("🚀 Starting sync with peer %s (height %d vs our %d)",
         bestPeer.ID, bestPeer.ChainHeight, currentHeight)
+
+    // Stop mining during sync to prevent creating fork blocks
+    log.Printf("⏸️  [CONSENSUS] Stopping mining during sync to prevent fork blocks...")
+    if ce.miner != nil && ce.miner.IsRunning() {
+        if err := ce.miner.Stop(); err != nil {
+            log.Printf("❌ [CONSENSUS] Failed to stop miner for sync: %v", err)
+        } else {
+            log.Printf("✅ [CONSENSUS] Miner stopped for sync")
+        }
+    }
 
     ce.statusMutex.Lock()
     ce.syncStatus = SyncStatus{
@@ -657,13 +760,290 @@ func (ce *ConsensusEngine) performSync() {
     }
     ce.statusMutex.Unlock()
 
-    // Use next expected height for sync to ensure proper ordering
+    // Use simple sync approach (SyncFirst handles initial sync, this handles ongoing sync)
     ce.syncMutex.RLock()
     nextHeight := ce.nextExpectedHeight
     ce.syncMutex.RUnlock()
 
     // Request blocks from next expected height
+    log.Printf("🔄 [ONGOING-SYNC] Requesting blocks from height %d to %d", nextHeight, bestPeer.ChainHeight)
     ce.requestBlocksFromPeer(bestPeer, nextHeight, bestPeer.ChainHeight)
+}
+
+// performSequentialSync implements sequential sync with fork detection and block trimming
+func (ce *ConsensusEngine) performSequentialSync(bestPeer *Peer) {
+    currentTip, err := ce.blockchain.GetTip()
+    if err != nil {
+        log.Printf("❌ [SYNC] Failed to get current tip: %v", err)
+        return
+    }
+    
+    currentHeight := currentTip.Header.Height
+    targetHeight := bestPeer.ChainHeight
+    nextHeight := currentHeight + 1
+    
+    // Reset nextExpectedHeight to match our actual blockchain state
+    ce.syncMutex.Lock()
+    ce.nextExpectedHeight = nextHeight
+    ce.pendingBlocks = make(map[uint64]*Block) // Clear any stale pending blocks
+    ce.syncMutex.Unlock()
+    
+    log.Printf("🔍 [SYNC] Starting sequential sync from height %d to %d", nextHeight, targetHeight)
+    
+    for nextHeight <= targetHeight {
+        log.Printf("🔄 [SYNC] Requesting next block at height %d", nextHeight)
+        
+        // Request only the next block
+        ce.requestBlocksFromPeer(bestPeer, nextHeight, nextHeight)
+        
+        // Wait a bit for the block to arrive
+        time.Sleep(1 * time.Second)
+        
+        // Check if we received the block
+        ce.syncMutex.RLock()
+        block, exists := ce.pendingBlocks[nextHeight]
+        ce.syncMutex.RUnlock()
+        
+        if !exists {
+            log.Printf("⏳ [SYNC] Block %d not received yet, retrying...", nextHeight)
+            continue
+        }
+        
+        // Check for fork: does the block's previous hash match our current tip?
+        if block.Header.PreviousBlockHash != currentTip.Hash() {
+            log.Printf("🍴 [SYNC] Fork detected at height %d! Block's previous hash %s != our tip %s", 
+                nextHeight, block.Header.PreviousBlockHash[:16]+"...", currentTip.Hash()[:16]+"...")
+            
+            // Special case: if we're at genesis (height 0), we need to get the missing block first
+            if currentHeight == 0 {
+                log.Printf("🔍 [SYNC] At genesis, need to request block 1 first (hash %s)", 
+                    block.Header.PreviousBlockHash[:16]+"...")
+                
+                // Request block 1 (the missing previous block)
+                missingHeight := nextHeight - 1
+                log.Printf("🔄 [SYNC] Requesting missing block at height %d", missingHeight)
+                ce.requestBlocksFromPeer(bestPeer, missingHeight, missingHeight)
+                
+                // Wait for it and try to add it
+                time.Sleep(1 * time.Second)
+                ce.syncMutex.RLock()
+                missingBlock, hasMissing := ce.pendingBlocks[missingHeight]
+                ce.syncMutex.RUnlock()
+                
+                if hasMissing {
+                    log.Printf("✅ [SYNC] Got missing block %d, trying to add it", missingHeight)
+                    ce.syncMutex.Lock()
+                    delete(ce.pendingBlocks, missingHeight)
+                    ce.syncMutex.Unlock()
+                    
+                    if err := ce.blockchain.AddBlock(missingBlock); err != nil {
+                        log.Printf("❌ [SYNC] Failed to add missing block %d: %v", missingHeight, err)
+                        // If we can't add block 1, this is a deeper problem - maybe we need block 0 too?
+                        log.Printf("🔄 [SYNC] Block 1 also has missing dependency, will restart from genesis")
+                        return
+                    } else {
+                        log.Printf("✅ [SYNC] Successfully added missing block %d", missingHeight)
+                        // Update our state and retry the original block
+                        currentTip = missingBlock
+                        currentHeight = missingHeight
+                        // Don't increment nextHeight - retry the same block
+                        continue
+                    }
+                } else {
+                    log.Printf("❌ [SYNC] Could not get missing block %d", missingHeight)
+                    return
+                }
+            } else {
+                // Normal case: trim blocks to resolve the fork
+                trimHeight := currentHeight
+                if currentHeight >= 6 {
+                    trimHeight = currentHeight - 6
+                } else {
+                    trimHeight = 0
+                }
+                
+                log.Printf("✂️ [SYNC] Trimming blocks from height %d to resolve fork", trimHeight)
+                
+                if err := ce.blockchain.TrimBlocksFromHeight(trimHeight); err != nil {
+                    log.Printf("❌ [SYNC] Failed to trim blocks: %v", err)
+                    return
+                }
+                
+                // Update our current tip after trimming
+                newTip, err := ce.blockchain.GetTip()
+                if err != nil {
+                    log.Printf("❌ [SYNC] Failed to get tip after trimming: %v", err)
+                    return
+                }
+                
+                currentTip = newTip
+                currentHeight = newTip.Header.Height
+                nextHeight = currentHeight + 1
+                
+                // Clear pending blocks as they may be invalid now
+                ce.syncMutex.Lock()
+                ce.pendingBlocks = make(map[uint64]*Block)
+                ce.nextExpectedHeight = nextHeight
+                ce.syncMutex.Unlock()
+                
+                log.Printf("🔄 [SYNC] After trimming, continuing from height %d", nextHeight)
+                continue
+            }
+        }
+        
+        // Block is valid, try to add it
+        log.Printf("✅ [SYNC] Block %d matches our chain, attempting to add", nextHeight)
+        
+        // Remove from pending and try to add to blockchain
+        ce.syncMutex.Lock()
+        delete(ce.pendingBlocks, nextHeight)
+        ce.syncMutex.Unlock()
+        
+        if err := ce.blockchain.AddBlock(block); err != nil {
+            log.Printf("❌ [SYNC] Failed to add block %d: %v", nextHeight, err)
+            
+            // Check if it's a "previous block not found" error - this means we have a fork
+            if strings.Contains(err.Error(), "previous block not found") {
+                log.Printf("🍴 [SYNC] Block %d expects previous block %s but we don't have it - this is a fork!", 
+                    nextHeight, block.Header.PreviousBlockHash[:16]+"...")
+                
+                // Special case: if we're at genesis (height 0), we can't trim anything
+                // Instead, we need to request the missing block first
+                if currentHeight == 0 {
+                    log.Printf("🔍 [SYNC] At genesis, need to request missing block %s first", 
+                        block.Header.PreviousBlockHash[:16]+"...")
+                    
+                    // Request block 1 (the missing previous block)
+                    missingHeight := nextHeight - 1
+                    log.Printf("🔄 [SYNC] Requesting missing block at height %d", missingHeight)
+                    ce.requestBlocksFromPeer(bestPeer, missingHeight, missingHeight)
+                    
+                    // Wait for it and try to add it
+                    time.Sleep(1 * time.Second)
+                    ce.syncMutex.RLock()
+                    missingBlock, hasMissing := ce.pendingBlocks[missingHeight]
+                    ce.syncMutex.RUnlock()
+                    
+                    if hasMissing {
+                        log.Printf("✅ [SYNC] Got missing block %d, trying to add it", missingHeight)
+                        ce.syncMutex.Lock()
+                        delete(ce.pendingBlocks, missingHeight)
+                        ce.syncMutex.Unlock()
+                        
+                        if err := ce.blockchain.AddBlock(missingBlock); err != nil {
+                            log.Printf("❌ [SYNC] Failed to add missing block %d: %v", missingHeight, err)
+                            // If we can't add block 1, this is a deeper problem
+                            return
+                        } else {
+                            log.Printf("✅ [SYNC] Successfully added missing block %d", missingHeight)
+                            // Update our state and retry the original block
+                            currentTip = missingBlock
+                            currentHeight = missingHeight
+                            // Don't increment nextHeight - retry the same block
+                            continue
+                        }
+                    } else {
+                        log.Printf("❌ [SYNC] Could not get missing block %d", missingHeight)
+                        return
+                    }
+                } else {
+                    // Normal case: trim blocks to resolve the fork
+                    trimHeight := currentHeight
+                    if currentHeight >= 6 {
+                        trimHeight = currentHeight - 6
+                    } else {
+                        trimHeight = 0
+                    }
+                    
+                    log.Printf("✂️ [SYNC] Fork detected via validation failure, trimming from height %d", trimHeight)
+                    
+                    if err := ce.blockchain.TrimBlocksFromHeight(trimHeight); err != nil {
+                        log.Printf("❌ [SYNC] Failed to trim blocks after validation failure: %v", err)
+                        return
+                    }
+                    
+                    // Reset and continue
+                    newTip, err := ce.blockchain.GetTip()
+                    if err != nil {
+                        log.Printf("❌ [SYNC] Failed to get tip after trim: %v", err)
+                        return
+                    }
+                    
+                    currentTip = newTip
+                    currentHeight = newTip.Header.Height
+                    nextHeight = currentHeight + 1
+                    
+                    // Clear pending blocks
+                    ce.syncMutex.Lock()
+                    ce.pendingBlocks = make(map[uint64]*Block)
+                    ce.nextExpectedHeight = nextHeight
+                    ce.syncMutex.Unlock()
+                    
+                    log.Printf("🔄 [SYNC] After trimming for validation fork, continuing from height %d", nextHeight)
+                    continue
+                }
+            } else {
+                // Other validation error - trim if possible
+                if currentHeight >= 6 {
+                    trimHeight := currentHeight - 6
+                    log.Printf("✂️ [SYNC] Block validation failed with other error, trimming from height %d", trimHeight)
+                    
+                    if err := ce.blockchain.TrimBlocksFromHeight(trimHeight); err != nil {
+                        log.Printf("❌ [SYNC] Failed to trim blocks after validation error: %v", err)
+                        return
+                    }
+                    
+                    // Reset and continue
+                    newTip, err := ce.blockchain.GetTip()
+                    if err != nil {
+                        log.Printf("❌ [SYNC] Failed to get tip after trim: %v", err)
+                        return
+                    }
+                    
+                    currentTip = newTip
+                    currentHeight = newTip.Header.Height
+                    nextHeight = currentHeight + 1
+                    
+                    // Clear pending blocks
+                    ce.syncMutex.Lock()
+                    ce.pendingBlocks = make(map[uint64]*Block)
+                    ce.nextExpectedHeight = nextHeight
+                    ce.syncMutex.Unlock()
+                    
+                    continue
+                } else {
+                    log.Printf("❌ [SYNC] Cannot trim more blocks, sync failed")
+                    return
+                }
+            }
+        }
+        
+        // Successfully added block
+        currentTip = block
+        currentHeight = nextHeight
+        nextHeight++
+        
+        // Update sync tracking
+        ce.syncMutex.Lock()
+        ce.nextExpectedHeight = nextHeight
+        ce.syncMutex.Unlock()
+        
+        // Update sync status
+        ce.statusMutex.Lock()
+        ce.syncStatus.CurrentHeight = currentHeight
+        if targetHeight > currentHeight {
+            ce.syncStatus.SyncProgress = float64(currentHeight) / float64(targetHeight)
+        } else {
+            ce.syncStatus.SyncProgress = 1.0
+        }
+        ce.syncStatus.LastSyncTime = time.Now().UTC()
+        ce.statusMutex.Unlock()
+        
+        log.Printf("📈 [SYNC] Successfully added block %d, progress: %d/%d (%.1f%%)", 
+            currentHeight, currentHeight, targetHeight, ce.syncStatus.SyncProgress*100)
+    }
+    
+    log.Printf("🎉 [SYNC] Sequential sync completed! Final height: %d", currentHeight)
 }
 
 // requestMissingBlocks requests missing blocks when a gap is detected
@@ -1008,10 +1388,11 @@ func (ce *ConsensusEngine) performChainReorganization(peer *Peer, startHeight, e
 
     // Restart mining on the reorganized chain
     if ce.miner != nil && !ce.miner.IsRunning() {
+        log.Printf("🔨 [CONSENSUS] Restarting miner after reorganization...")
         if err := ce.miner.Start(); err != nil {
             log.Printf("❌ [CONSENSUS] Failed to restart miner after reorganization: %v", err)
         } else {
-            log.Printf("🔨 [CONSENSUS] Miner restarted successfully on reorganized chain")
+            log.Printf("✅ [CONSENSUS] Miner restarted on reorganized chain")
         }
     }
 }
