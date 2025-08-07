@@ -582,3 +582,42 @@ func (ts *TokenState) ResetToGenesis() error {
 	log.Printf("✅ [TOKEN_STATE] Token state reset to genesis complete")
 	return nil
 }
+
+// MintTokens increases the total supply of a token and credits them to the token creator
+func (ts *TokenState) MintTokens(tokenID string, amount uint64) error {
+	return ts.MintTokensTo(tokenID, amount, "")
+}
+
+// MintTokensTo increases the total supply of a token and credits them to a specific address
+// If toAddress is empty, credits to the token creator
+func (ts *TokenState) MintTokensTo(tokenID string, amount uint64, toAddress string) error {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	
+	// Check if token exists
+	token, exists := ts.tokens[tokenID]
+	if !exists {
+		return fmt.Errorf("token %s does not exist", tokenID)
+	}
+	
+	// Increase total supply
+	token.TotalSupply += amount
+	
+	// Determine recipient address
+	recipient := toAddress
+	if recipient == "" {
+		recipient = token.Creator
+	}
+	
+	// Credit the new tokens to the specified address
+	if ts.balances[tokenID] == nil {
+		ts.balances[tokenID] = make(map[string]uint64)
+	}
+	ts.balances[tokenID][recipient] += amount
+	
+	log.Printf("Minted %d tokens of %s to %s, new total supply: %d", amount, tokenID, recipient, token.TotalSupply)
+	log.Printf("🔍 [TOKEN_STATE] Recipient %s now has balance: %d", recipient, ts.balances[tokenID][recipient])
+	
+	// Save state
+	return ts.saveState()
+}

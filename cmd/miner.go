@@ -157,8 +157,13 @@ func (m *Miner) miningLoop() {
 	ticker := time.NewTicker(targetInterval)
 	defer ticker.Stop()
 	
-	// Track mining sequence
+	// Create countdown timer that logs every 60 seconds
+	countdownTicker := time.NewTicker(60 * time.Second)
+	defer countdownTicker.Stop()
+	
+	// Track mining sequence and timing
 	sequence := uint64(0)
+	lastAttemptTime := time.Now()
 	log.Printf("📊 Mining statistics will be logged every attempt")
 	log.Printf("🔍 Starting mining sequence #%d", sequence+1)
 	
@@ -168,7 +173,25 @@ func (m *Miner) miningLoop() {
 			log.Printf("🛑 Mining loop stopping after %d attempts", sequence)
 			return
 			
+		case <-countdownTicker.C:
+			// Calculate time until next block attempt
+			elapsed := time.Since(lastAttemptTime)
+			remaining := targetInterval - elapsed
+			if remaining < 0 {
+				remaining = 0
+			}
+			
+			minutes := int(remaining.Minutes())
+			seconds := int(remaining.Seconds()) % 60
+			
+			if remaining > 0 {
+				log.Printf("⏰ Next block attempt in %d minutes %d seconds", minutes, seconds)
+			} else {
+				log.Printf("⏰ Next block attempt due now")
+			}
+			
 		case <-ticker.C:
+			lastAttemptTime = time.Now()
 			sequence++
 			log.Printf("⚡ === MINING ATTEMPT #%d ===", sequence)
 			log.Printf("🕒 Time: %s", time.Now().Format("2006-01-02 15:04:05"))
@@ -417,6 +440,13 @@ func (m *Miner) collectTransactions() []SignedTransaction {
 	for _, mempoolTx := range mempoolTxs {
 		// Basic validation (could add more sophisticated checks)
 		if mempoolTx.TxHash != "" && mempoolTx.Transaction != nil {
+			// Log transaction outputs to track L-address handling
+			var parsedTx Transaction
+			if err := json.Unmarshal(mempoolTx.Transaction.Transaction, &parsedTx); err == nil {
+				for i, output := range parsedTx.Outputs {
+					log.Printf("🔍 [MINER] Collecting tx with output %d: Address=%s, Value=%d", i, output.Address, output.Value)
+				}
+			}
 			validTxs = append(validTxs, *mempoolTx.Transaction)
 		}
 	}

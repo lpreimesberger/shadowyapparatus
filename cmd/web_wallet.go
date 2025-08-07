@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1913,7 +1914,7 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
                     
                     <div class="form-group">
                         <label for="sendAddress">To Address:</label>
-                        <input type="text" id="sendAddress" name="sendAddress" placeholder="S..." required>
+                        <input type="text" id="sendAddress" name="sendAddress" placeholder="S... or L..." required>
                     </div>
                     <div class="form-group">
                         <label for="sendAmount" id="sendAmountLabel">Amount (SHADOW):</label>
@@ -2273,17 +2274,17 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
                             
                             <div class="form-group">
                                 <label for="poolName">Pool Name</label>
-                                <input type="text" id="poolName" name="poolName" placeholder="e.g., CATGIRL/SHADOW Pool" required>
+                                <input type="text" id="poolName" name="poolName" placeholder="Leave empty for auto-generated name">
                                 <div class="form-help">
-                                    Human-readable name for your pool.
+                                    Human-readable name for your pool. Auto-generated format: TOKEN1/TOKEN2-FEE%-Pool-GUID
                                 </div>
                             </div>
                             
                             <div class="form-group">
                                 <label for="poolTicker">Pool Ticker</label>
-                                <input type="text" id="poolTicker" name="poolTicker" placeholder="e.g., CATSHADOW" maxlength="12" required>
+                                <input type="text" id="poolTicker" name="poolTicker" placeholder="Leave empty for auto-generated ticker" maxlength="32">
                                 <div class="form-help">
-                                    Short symbol for the pool NFT (max 12 characters).
+                                    Short symbol for the pool NFT. Auto-generated format: TOKEN1_TOKEN2_FEE_GUID
                                 </div>
                             </div>
                             
@@ -2381,6 +2382,11 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
     </div>
 
     <script>
+        // Fix for refreshMarketplace function - define early to prevent ReferenceError
+        function refreshMarketplace() {
+            loadMarketplace();
+        }
+        
         let walletData = null;
         let lastBlockTime = null;
         let blockInterval = 600; // 10 minutes (600 seconds) - production block time
@@ -2888,15 +2894,16 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
                 
                 const pools = await response.json();
                 
-                if (pools.length === 0) {
+                // Add null checks - blockchain node returns array directly or null
+                if (!pools || pools.length === 0) {
                     poolsList.innerHTML = '<div class="no-pools">No active liquidity pools found. Create the first one!</div>';
                     return;
                 }
                 
                 let poolsHTML = '';
                 pools.forEach(pool => {
-                    const tokenAName = pool.token_a === 'SHADOW' ? 'SHADOW' : (pool.token_a_name || pool.token_a.substring(0, 8) + '...');
-                    const tokenBName = pool.token_b === 'SHADOW' ? 'SHADOW' : (pool.token_b_name || pool.token_b.substring(0, 8) + '...');
+                    const tokenAName = pool.token_a_name || 'SHADOW';
+                    const tokenBName = pool.token_b_name || 'SHADOW';
                     const feePercent = (pool.fee_rate / 100).toFixed(1);
                     
                     poolsHTML += '<div class="pool-item">';
@@ -4630,10 +4637,13 @@ func (sn *ShadowNode) handleWebWalletSend(w http.ResponseWriter, r *http.Request
 	}
 	
 	// Validate address format
+	log.Printf("🔍 [WALLET_SEND] Received send request to address: %s (len=%d, first_char=%c)", 
+		sendData.ToAddress, len(sendData.ToAddress), sendData.ToAddress[0])
 	if !IsValidAddress(sendData.ToAddress) {
 		http.Error(w, "Invalid destination address format", http.StatusBadRequest)
 		return
 	}
+	log.Printf("✅ [WALLET_SEND] Address validation passed for: %s", sendData.ToAddress)
 	
 	// Validate amount
 	if sendData.Amount <= 0 {
@@ -4779,6 +4789,8 @@ func (sn *ShadowNode) handleWebWalletSend(w http.ResponseWriter, r *http.Request
 		}
 		
 		// Add token transfer operation
+		log.Printf("🔍 [WALLET_SEND] Creating token transfer: tokenID=%s, amount=%d, from=%s, to=%s", 
+			sendData.TokenID, amountTokenUnits, session.Address, sendData.ToAddress)
 		tx.AddTokenTransfer(sendData.TokenID, amountTokenUnits, session.Address, sendData.ToAddress)
 	}
 	
@@ -4795,11 +4807,17 @@ func (sn *ShadowNode) handleWebWalletSend(w http.ResponseWriter, r *http.Request
 	tx.AddInput(placeholderTxHash, 0)
 	
 	// Sign the transaction
+	log.Printf("🔍 [WALLET_SEND] Signing transaction with %d token operations", len(tx.TokenOps))
+	if len(tx.TokenOps) > 0 {
+		log.Printf("🔍 [WALLET_SEND] First token operation: Type=%d, From=%s, To=%s, TokenID=%s", 
+			tx.TokenOps[0].Type, tx.TokenOps[0].From, tx.TokenOps[0].To, tx.TokenOps[0].TokenID)
+	}
 	signedTx, err := SignTransactionWithWallet(tx, wallet)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to sign transaction: %v", err), http.StatusInternalServerError)
 		return
 	}
+	log.Printf("✅ [WALLET_SEND] Transaction signed successfully")
 	
 	// Submit to mempool
 	if sn.mempool != nil {
@@ -5822,9 +5840,6 @@ func (sn *ShadowNode) handleWebWalletPeers(w http.ResponseWriter, r *http.Reques
         startAutoRefresh();
         
         // Removed duplicate updateTradeForm function - using the one defined earlier
-        function refreshMarketplace() {
-            loadMarketplace();
-        }
         
         // Skip duplicate functions - they're already defined earlier
             console.log('updateTradeForm called');
@@ -5903,10 +5918,6 @@ func (sn *ShadowNode) handleWebWalletPeers(w http.ResponseWriter, r *http.Reques
             document.getElementById('lockedTokenBalance').textContent = '';
         }
         
-        function refreshMarketplace() {
-            loadMarketplace();
-        }
-        
         // Removed duplicate submitTradeOffer function - using the one defined earlier
             event.preventDefault();
             
@@ -5973,10 +5984,6 @@ func (sn *ShadowNode) handleWebWalletPeers(w http.ResponseWriter, r *http.Reques
             }
         }
         
-        function refreshMarketplace() {
-            loadMarketplace();
-        }
-
         // Close modal when clicking outside
         window.onclick = function(event) {
             const modal = document.getElementById('meltModal');

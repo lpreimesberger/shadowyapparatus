@@ -989,27 +989,49 @@ func DeriveAddress(publicKey []byte) string {
 
 // IsValidAddress validates a Shadowy address
 func IsValidAddress(address string) bool {
-	// Check prefix and decode hex
-	if len(address) != 1+AddressLen*2 || address[0] != 'S' {
+	// Handle different address types
+	if len(address) == 0 {
 		return false
 	}
 	
-	decoded, err := hex.DecodeString(address[1:])
-	if err != nil || len(decoded) != AddressLen {
+	switch address[0] {
+	case 'S':
+		// Standard Shadowy address validation
+		if len(address) != 1+AddressLen*2 {
+			return false
+		}
+		
+		decoded, err := hex.DecodeString(address[1:])
+		if err != nil || len(decoded) != AddressLen {
+			return false
+		}
+		
+		// Check version
+		if decoded[0] != AddressVersion {
+			return false
+		}
+		
+		// Verify checksum
+		payload := decoded[:21]
+		providedChecksum := decoded[21:]
+		expectedChecksum := calculateChecksum(payload)
+		
+		return bytesEqual(providedChecksum, expectedChecksum)
+		
+	case 'L':
+		// Liquidity pool address validation (L-addresses)
+		// L-addresses are 41 characters: L + 40 hex chars
+		if len(address) != 41 {
+			return false
+		}
+		
+		// Verify the remaining 40 characters are valid hex
+		_, err := hex.DecodeString(address[1:])
+		return err == nil
+		
+	default:
 		return false
 	}
-	
-	// Check version
-	if decoded[0] != AddressVersion {
-		return false
-	}
-	
-	// Verify checksum
-	payload := decoded[:21]
-	providedChecksum := decoded[21:]
-	expectedChecksum := calculateChecksum(payload)
-	
-	return bytesEqual(providedChecksum, expectedChecksum)
 }
 
 // calculateChecksum computes 4-byte checksum using double SHA256

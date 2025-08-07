@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -644,7 +645,7 @@ func loggingMiddleware(next http.Handler) http.Handler {
 
 		shouldSkip := false
 		for _, path := range skipPaths {
-			if r.URL.Path == path {
+			if strings.HasPrefix(r.URL.Path, path) {
 				shouldSkip = true
 				break
 			}
@@ -1730,9 +1731,41 @@ func (sn *ShadowNode) handlePoolCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
+	// Generate default name and ticker if not provided
 	if req.Name == "" || req.Ticker == "" {
-		http.Error(w, "Pool name and ticker are required", http.StatusBadRequest)
-		return
+		tokenAName := req.TokenA
+		tokenBName := req.TokenB
+		
+		// Get token symbols for cleaner names
+		if req.TokenA != "SHADOW" {
+			if tokenState := sn.blockchain.GetTokenState(); tokenState != nil {
+				if tokenAInfo, err := tokenState.GetTokenInfo(req.TokenA); err == nil {
+					tokenAName = tokenAInfo.Ticker
+				}
+			}
+		}
+		if req.TokenB != "SHADOW" {
+			if tokenState := sn.blockchain.GetTokenState(); tokenState != nil {
+				if tokenBInfo, err := tokenState.GetTokenInfo(req.TokenB); err == nil {
+					tokenBName = tokenBInfo.Ticker
+				}
+			}
+		}
+		
+		// Generate GUID (use timestamp + random for better uniqueness)
+		guid := fmt.Sprintf("%x", time.Now().UnixNano())[:8]
+		
+		// Default format: TOKEN1/TOKEN2-FEERATE-GUID
+		feeRatePercent := float64(req.FeeRate) / 100.0
+		defaultName := fmt.Sprintf("%s/%s-%.1f%%-Pool-%s", tokenAName, tokenBName, feeRatePercent, guid)
+		defaultTicker := fmt.Sprintf("%s_%s_%.0f_%s", tokenAName, tokenBName, feeRatePercent*10, guid) // Cleaner ticker format
+		
+		if req.Name == "" {
+			req.Name = defaultName
+		}
+		if req.Ticker == "" {
+			req.Ticker = defaultTicker
+		}
 	}
 	
 	// Check if we have a wallet session

@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sync"
 	"time"
 )
@@ -230,6 +231,12 @@ func (mp *Mempool) AddTransaction(tx *SignedTransaction, source TransactionSourc
 	var parsedTx Transaction
 	if err := json.Unmarshal(tx.Transaction, &parsedTx); err != nil {
 		return fmt.Errorf("failed to parse transaction: %w", err)
+	}
+	
+	// Log transaction outputs to track L-address handling
+	log.Printf("🔍 [MEMPOOL] Adding transaction with %d outputs", len(parsedTx.Outputs))
+	for i, output := range parsedTx.Outputs {
+		log.Printf("🔍 [MEMPOOL] Output %d: Address=%s, Value=%d", i, output.Address, output.Value)
 	}
 	
 	// Calculate transaction size

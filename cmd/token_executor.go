@@ -24,6 +24,12 @@ func NewTokenExecutor(tokenState *TokenState, syndicateManager *SyndicateManager
 func (te *TokenExecutor) ExecuteTokenOperations(tx *Transaction) (*TokenExecutionResult, error) {
 	log.Printf("🔍 [TOKEN_EXECUTOR] Starting execution of %d token operations", len(tx.TokenOps))
 	
+	// Log all token operations for debugging
+	for i, op := range tx.TokenOps {
+		log.Printf("🔍 [TOKEN_EXECUTOR] Operation %d: Type=%d, From=%s, To=%s, TokenID=%s, Amount=%d", 
+			i, op.Type, op.From, op.To, op.TokenID, op.Amount)
+	}
+	
 	if len(tx.TokenOps) == 0 {
 		log.Printf("🔍 [TOKEN_EXECUTOR] No token operations to execute")
 		return &TokenExecutionResult{Success: true}, nil
@@ -134,6 +140,24 @@ func (te *TokenExecutor) executeTokenTransfer(tokenOp TokenOperation, index int)
 	log.Printf("Transferred %d tokens of %s from %s to %s", 
 		tokenOp.Amount, tokenOp.TokenID, tokenOp.From, tokenOp.To)
 	
+	// Check if destination is an L-address (liquidity pool)
+	log.Printf("🔍 [TOKEN_EXECUTOR] Checking if destination %s is L-address (len=%d, first_char=%c)", 
+		tokenOp.To, len(tokenOp.To), tokenOp.To[0])
+	if len(tokenOp.To) == 41 && tokenOp.To[0] == 'L' {
+		log.Printf("🏊 [TOKEN_EXECUTOR] Detected liquidity provision to L-address %s", tokenOp.To)
+		log.Printf("🏊 [TOKEN_EXECUTOR] Calling handleLiquidityProvision with: L-address=%s, provider=%s, tokenID=%s, amount=%d", 
+			tokenOp.To, tokenOp.From, tokenOp.TokenID, tokenOp.Amount)
+		err = te.handleLiquidityProvision(tokenOp.To, tokenOp.From, tokenOp.TokenID, tokenOp.Amount)
+		if err != nil {
+			log.Printf("❌ [TOKEN_EXECUTOR] Failed to handle liquidity provision: %v", err)
+			// Don't fail the transaction, just log the error
+		} else {
+			log.Printf("✅ [TOKEN_EXECUTOR] Liquidity provision handled successfully")
+		}
+	} else {
+		log.Printf("🔍 [TOKEN_EXECUTOR] Not an L-address, skipping liquidity provision")
+	}
+	
 	return &TokenOpResult{
 		Index:         index,
 		Type:          TOKEN_TRANSFER,
@@ -145,6 +169,135 @@ func (te *TokenExecutor) executeTokenTransfer(tokenOp TokenOperation, index int)
 		ShadowReleased: 0,
 		Success:       true,
 	}, nil
+}
+
+// handleLiquidityProvision processes when someone sends tokens to an L-address
+func (te *TokenExecutor) handleLiquidityProvision(lAddress, provider, tokenID string, amount uint64) error {
+	log.Printf("🏊 [LIQUIDITY] Processing liquidity provision: %s sent %d of token %s to pool %s", provider, amount, tokenID, lAddress)
+	
+	// Find the pool associated with this L-address
+	log.Printf("🔍 [LIQUIDITY] Looking for pool with L-address: %s", lAddress)
+	_, poolData, err := te.findPoolByLAddress(lAddress)
+	if err != nil {
+		log.Printf("❌ [LIQUIDITY] Failed to find pool for L-address %s: %v", lAddress, err)
+		return fmt.Errorf("failed to find pool for L-address %s: %w", lAddress, err)
+	}
+	log.Printf("✅ [LIQUIDITY] Found pool: %s/%s with ShareTokenID: %s", poolData.TokenA, poolData.TokenB, poolData.ShareTokenID)
+	
+	// Validate that the token being sent is one of the pool's tokens
+	// Special handling for "SHADOW" which represents the base currency
+	if tokenID != poolData.TokenA && tokenID != poolData.TokenB {
+		return fmt.Errorf("token %s is not part of pool %s/%s", tokenID, poolData.TokenA, poolData.TokenB)
+	}
+	
+	// Special handling for SHADOW base currency
+	if tokenID == "SHADOW" {
+		log.Printf("🏊 [LIQUIDITY] Processing SHADOW base currency liquidity provision")
+		if poolData.TokenA != "SHADOW" && poolData.TokenB != "SHADOW" {
+			return fmt.Errorf("pool does not accept SHADOW base currency")
+		}
+	}
+	
+	// Get current pool reserves (tokens held by L-address)
+	var reserveA, reserveB uint64
+	
+	// Handle SHADOW base currency reserves specially
+	if poolData.TokenA == "SHADOW" {
+		// For SHADOW, we would need to check the UTXO balance at the L-address
+		// For now, assume 0 as this requires UTXO tracking
+		reserveA = 0
+		log.Printf("🏊 [LIQUIDITY] SHADOW reserve tracking not implemented - assuming 0")
+	} else {
+		reserveA, err = te.getTokenBalance(poolData.TokenA, lAddress)
+		if err != nil {
+			reserveA = 0
+		}
+	}
+	
+	if poolData.TokenB == "SHADOW" {
+		// For SHADOW, we would need to check the UTXO balance at the L-address
+		reserveB = 0
+		log.Printf("🏊 [LIQUIDITY] SHADOW reserve tracking not implemented - assuming 0")
+	} else {
+		reserveB, err = te.getTokenBalance(poolData.TokenB, lAddress)
+		if err != nil {
+			reserveB = 0
+		}
+	}
+	
+	log.Printf("🏊 [LIQUIDITY] Pool reserves: %d %s, %d %s", reserveA, poolData.TokenA, reserveB, poolData.TokenB)
+	
+	// Get total LP token supply
+	shareToken, err := te.tokenState.GetTokenInfo(poolData.ShareTokenID)
+	if err != nil {
+		return fmt.Errorf("failed to get LP token info: %w", err)
+	}
+	
+	// Calculate LP tokens to mint
+	// For single-sided liquidity provision, use the formula:
+	// LP_tokens = (amount / pool_reserve) * total_LP_supply
+	var lpTokensToMint uint64
+	var currentReserve uint64
+	
+	if tokenID == poolData.TokenA {
+		currentReserve = reserveA
+	} else {
+		currentReserve = reserveB
+	}
+	
+	if currentReserve == 0 {
+		// First liquidity provision - mint proportional to initial supply
+		lpTokensToMint = amount * 1000 // Simple ratio for first provision
+	} else {
+		// Calculate proportional LP tokens: (amount / reserve) * total_supply
+		lpTokensToMint = (amount * shareToken.TotalSupply) / currentReserve
+	}
+	
+	if lpTokensToMint == 0 {
+		return fmt.Errorf("calculated LP tokens to mint is 0")
+	}
+	
+	log.Printf("🏊 [LIQUIDITY] Minting %d LP tokens directly to liquidity provider %s", lpTokensToMint, provider)
+	
+	// Mint new LP tokens directly to the liquidity provider
+	err = te.tokenState.MintTokensTo(poolData.ShareTokenID, lpTokensToMint, provider)
+	if err != nil {
+		return fmt.Errorf("failed to mint LP tokens to provider: %w", err)
+	}
+	
+	log.Printf("✅ [LIQUIDITY] Successfully provided liquidity: %s received %d LP tokens", provider, lpTokensToMint)
+	return nil
+}
+
+// findPoolByLAddress finds the pool NFT and data associated with an L-address
+func (te *TokenExecutor) findPoolByLAddress(lAddress string) (string, *LiquidityPoolData, error) {
+	// Get all tokens and search for pools with matching L-address
+	allTokens := te.tokenState.GetAllTokens()
+	log.Printf("🔍 [LIQUIDITY] Searching through %d tokens for L-address %s", len(allTokens), lAddress)
+	
+	poolCount := 0
+	for tokenID, metadata := range allTokens {
+		if metadata.LiquidityPool != nil {
+			poolCount++
+			log.Printf("🔍 [LIQUIDITY] Found pool token %s with L-address %s", tokenID, metadata.LiquidityPool.LAddress)
+			if metadata.LiquidityPool.LAddress == lAddress {
+				log.Printf("✅ [LIQUIDITY] Found matching pool: tokenID=%s, L-address=%s", tokenID, lAddress)
+				return tokenID, metadata.LiquidityPool, nil
+			}
+		}
+	}
+	
+	log.Printf("❌ [LIQUIDITY] No pool found for L-address %s after searching %d pools", lAddress, poolCount)
+	return "", nil, fmt.Errorf("no pool found for L-address %s", lAddress)
+}
+
+// getTokenBalance gets the token balance for an address
+func (te *TokenExecutor) getTokenBalance(tokenID, address string) (uint64, error) {
+	balances := te.tokenState.GetTokenBalances(tokenID)
+	if balance, exists := balances[address]; exists {
+		return balance, nil
+	}
+	return 0, fmt.Errorf("no balance found for token %s at address %s", tokenID, address)
 }
 
 // executeTokenMelt processes a token melt operation
@@ -446,9 +599,11 @@ func (te *TokenExecutor) executePoolCreate(tokenOp TokenOperation, index int) (*
 	
 	// Create the share token with high melt value
 	if poolData.ShareTokenID != "" {
+		// Add L-address suffix for uniqueness
+		lAddressSuffix := poolData.LAddress[len(poolData.LAddress)-8:] // Last 8 chars of L-address
 		shareMetadata := &TokenMetadata{
-			Name:         tokenOp.Metadata.Name + " Shares",
-			Ticker:       tokenOp.Metadata.Ticker + "_SHARE",
+			Name:         tokenOp.Metadata.Name + " LP-" + lAddressSuffix,
+			Ticker:       tokenOp.Metadata.Ticker + "_LP_" + lAddressSuffix,
 			TotalSupply:  1000000000000, // 1 trillion shares initially (high precision)
 			Decimals:     8,             // 8 decimal places for precision
 			LockAmount:   1000000000,    // 10 SHADOW per share (high melt value)
@@ -462,6 +617,18 @@ func (te *TokenExecutor) executePoolCreate(tokenOp TokenOperation, index int) (*
 			return nil, fmt.Errorf("failed to create share token: %w", err)
 		}
 		log.Printf("✅ [TOKEN_EXECUTOR] Created share token: %s", poolData.ShareTokenID)
+		
+		// Transfer initial LP tokens to the pool creator
+		// Initial liquidity provision gets 100% of the initial supply
+		initialLPTokens := shareMetadata.TotalSupply // All initial shares go to the pool creator
+		
+		log.Printf("🔍 [TOKEN_EXECUTOR] Transferring %d LP tokens to pool creator %s", initialLPTokens, tokenOp.To)
+		err = te.tokenState.TransferToken(poolData.ShareTokenID, poolData.LAddress, tokenOp.To, initialLPTokens)
+		if err != nil {
+			log.Printf("❌ [TOKEN_EXECUTOR] Failed to transfer LP tokens to pool creator: %v", err)
+			return nil, fmt.Errorf("failed to transfer LP tokens to pool creator: %w", err)
+		}
+		log.Printf("✅ [TOKEN_EXECUTOR] Transferred %d LP tokens to pool creator %s", initialLPTokens, tokenOp.To)
 	}
 	
 	log.Printf("✅ [TOKEN_EXECUTOR] Liquidity pool created: %s (%s/%s)", 

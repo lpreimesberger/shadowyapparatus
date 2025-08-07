@@ -824,6 +824,10 @@ func validateTokenOperation(tokenOp TokenOperation, index int) error {
 		return validateTradeOffer(tokenOp, index)
 	case TRADE_EXECUTE:
 		return validateTradeExecute(tokenOp, index)
+	case SYNDICATE_JOIN:
+		return validateSyndicateJoin(tokenOp, index)
+	case POOL_CREATE:
+		return validatePoolCreate(tokenOp, index)
 	default:
 		return fmt.Errorf("token operation %d: unknown operation type %d", index, tokenOp.Type)
 	}
@@ -1073,5 +1077,69 @@ func isValidURI(uri string) bool {
 	}
 	
 	return true
+}
+
+// validateSyndicateJoin validates syndicate join operation
+func validateSyndicateJoin(tokenOp TokenOperation, index int) error {
+	// Basic validation - token ID should be present
+	if tokenOp.TokenID == "" {
+		return fmt.Errorf("token operation %d: syndicate membership token ID is required", index)
+	}
+	
+	// Validate To address (the address joining the syndicate)
+	if tokenOp.To == "" {
+		return fmt.Errorf("token operation %d: destination address is required for syndicate join", index)
+	}
+	
+	// Amount should represent membership level or be 1 for basic membership
+	if tokenOp.Amount == 0 {
+		return fmt.Errorf("token operation %d: membership amount must be greater than 0", index)
+	}
+	
+	// Validate metadata if present (syndicate-specific data)
+	if tokenOp.Metadata != nil {
+		if tokenOp.Metadata.Name == "" {
+			return fmt.Errorf("token operation %d: syndicate name is required in metadata", index)
+		}
+		if tokenOp.Metadata.Ticker == "" {
+			return fmt.Errorf("token operation %d: syndicate ticker is required in metadata", index)
+		}
+	}
+	
+	return nil
+}
+
+// validatePoolCreate validates liquidity pool creation operation
+func validatePoolCreate(tokenOp TokenOperation, index int) error {
+	// Basic validation - token ID should be present (pool NFT ID)
+	if tokenOp.TokenID == "" {
+		return fmt.Errorf("token operation %d: pool NFT token ID is required", index)
+	}
+	
+	// Validate To address (the pool creator)
+	if tokenOp.To == "" {
+		return fmt.Errorf("token operation %d: pool creator address is required", index)
+	}
+	
+	// Amount should represent initial liquidity tokens or be > 0
+	if tokenOp.Amount == 0 {
+		return fmt.Errorf("token operation %d: initial liquidity amount must be greater than 0", index)
+	}
+	
+	// Validate metadata if present (pool-specific data)
+	if tokenOp.Metadata != nil {
+		if tokenOp.Metadata.Name == "" {
+			return fmt.Errorf("token operation %d: pool name is required in metadata", index)
+		}
+		if tokenOp.Metadata.Ticker == "" {
+			return fmt.Errorf("token operation %d: pool ticker is required in metadata", index)
+		}
+		// Pool metadata should have LockAmount representing initial reserve
+		if tokenOp.Metadata.LockAmount == 0 {
+			return fmt.Errorf("token operation %d: initial reserve amount is required in metadata", index)
+		}
+	}
+	
+	return nil
 }
 
