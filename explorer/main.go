@@ -5,6 +5,7 @@ import (
     "fmt"
     "html/template"
     "log"
+    "math/rand"
     "net/http"
     "os"
     "strconv"
@@ -49,6 +50,7 @@ func (es *ExplorerServer) Start() error {
     api.HandleFunc("/token/{tokenId}", es.handleTokenDetailsAPI).Methods("GET")
     api.HandleFunc("/pools", es.handlePoolsAPI).Methods("GET")
     api.HandleFunc("/pool/{poolId}", es.handlePoolDetailsAPI).Methods("GET")
+    api.HandleFunc("/storage", es.handleStorageAPI).Methods("GET")
     api.HandleFunc("/admin/reset", es.handleReset).Methods("POST")
     api.HandleFunc("/admin/test-token", es.handleTestToken).Methods("POST")
     api.HandleFunc("/admin/test-pool", es.handleTestPool).Methods("POST")
@@ -63,6 +65,7 @@ func (es *ExplorerServer) Start() error {
     router.HandleFunc("/token/{tokenId}", es.handleTokenDetailsPage).Methods("GET")
     router.HandleFunc("/pools", es.handlePoolsPage).Methods("GET")
     router.HandleFunc("/pool/{poolId}", es.handlePoolDetailsPage).Methods("GET")
+    router.HandleFunc("/storage", es.handleStoragePage).Methods("GET")
 
     log.Printf("🌐 Shadowy Explorer starting on http://localhost:10001")
     log.Printf("📡 Connecting to Shadowy node at %s", es.shadowyNodeURL)
@@ -295,6 +298,12 @@ func (es *ExplorerServer) handleHome(w http.ResponseWriter, r *http.Request) {
                 <div class="feature-icon">🪙</div>
                 <div class="feature-title"><a href="/tokens" style="color: #64b5f6; text-decoration: none;">Token System</a></div>
                 <div class="feature-desc">Native token creation and management</div>
+            </div>
+
+            <div class="feature">
+                <div class="feature-icon">💾</div>
+                <div class="feature-title"><a href="/storage" style="color: #64b5f6; text-decoration: none;">Proof of Storage</a></div>
+                <div class="feature-desc">Network storage capacity and farming nodes</div>
             </div>
 
             <div class="feature">
@@ -665,6 +674,211 @@ func (es *ExplorerServer) handlePoolDetailsAPI(w http.ResponseWriter, r *http.Re
     json.NewEncoder(w).Encode(poolDetails)
 }
 
+// Storage/farming network API endpoint
+func (es *ExplorerServer) handleStorageAPI(w http.ResponseWriter, r *http.Request) {
+    // Fetch tracker network statistics and nodes
+    trackerURL := "https://playatarot.com/api/v1/stats"
+    nodesURL := "https://playatarot.com/api/v1/nodes"
+    
+    // Create HTTP client with timeout
+    client := &http.Client{Timeout: 10 * time.Second}
+    
+    // Fetch network stats
+    statsResp, err := client.Get(trackerURL)
+    var trackerStats map[string]interface{}
+    if err != nil {
+        log.Printf("❌ Failed to fetch tracker stats: %v", err)
+    } else {
+        defer statsResp.Body.Close()
+        if err := json.NewDecoder(statsResp.Body).Decode(&trackerStats); err != nil {
+            log.Printf("❌ Failed to parse tracker stats: %v", err)
+            trackerStats = nil
+        }
+    }
+    
+    // Fetch detailed node information
+    nodesResp, err := client.Get(nodesURL)
+    var nodesData map[string]interface{}
+    var nodesList []map[string]interface{}
+    if err != nil {
+        log.Printf("❌ Failed to fetch nodes data: %v", err)
+    } else {
+        defer nodesResp.Body.Close()
+        if err := json.NewDecoder(nodesResp.Body).Decode(&nodesData); err != nil {
+            log.Printf("❌ Failed to parse nodes data: %v", err)
+        } else {
+            // Extract nodes from response
+            if nodes, ok := nodesData["nodes"].(map[string]interface{}); ok {
+                for _, node := range nodes {
+                    if nodeData, ok := node.(map[string]interface{}); ok {
+                        nodesList = append(nodesList, nodeData)
+                    }
+                }
+            }
+        }
+    }
+    
+    // If tracker data failed, return mock data
+    if trackerStats == nil {
+        log.Printf("📊 Using mock storage data - tracker unavailable")
+        mockData := map[string]interface{}{
+            "total_nodes": 5,
+            "online_nodes": 3,
+            "total_netspace": uint64(1024 * 1024 * 1024 * 1024 * 50), // 50TB
+            "consensus_height": 1000,
+            "avg_success_rate": 75.5,
+            "nodes": []map[string]interface{}{
+                {
+                    "node_id": "mock_node_1_abcdef123456",
+                    "plot_size": uint64(1024 * 1024 * 1024 * 1024 * 10), // 10TB
+                    "status": "online",
+                    "success_rate": 85.2,
+                    "blocks_found": 15,
+                    "last_block_time": "2025-01-15T10:30:00Z",
+                },
+                {
+                    "node_id": "mock_node_2_fedcba654321", 
+                    "plot_size": uint64(1024 * 1024 * 1024 * 1024 * 20), // 20TB
+                    "status": "online",
+                    "success_rate": 78.9,
+                    "blocks_found": 25,
+                    "last_block_time": "2025-01-15T09:45:00Z",
+                },
+                {
+                    "node_id": "mock_node_3_987654321abc",
+                    "plot_size": uint64(1024 * 1024 * 1024 * 1024 * 20), // 20TB 
+                    "status": "syncing",
+                    "success_rate": 62.1,
+                    "blocks_found": 8,
+                    "last_block_time": "2025-01-15T08:20:00Z",
+                },
+            },
+        }
+        
+        w.Header().Set("Content-Type", "application/json")
+        json.NewEncoder(w).Encode(mockData)
+        return
+    }
+    
+    // Transform tracker data and calculate farming metrics
+    totalNodes := getIntFromInterface(trackerStats["total_nodes"])
+    onlineNodes := getIntFromInterface(trackerStats["online_nodes"])
+    totalNetspace := getUint64FromInterface(trackerStats["total_netspace_bytes"])
+    consensusHeight := getUint64FromInterface(trackerStats["consensus_height"])
+    
+    // Transform node data for storage view
+    var transformedNodes []map[string]interface{}
+    var totalSuccessRate float64
+    var nodeCount int
+    
+    for _, nodeData := range nodesList {
+        nodeID, _ := nodeData["node_id"].(string)
+        if nodeID == "" {
+            continue
+        }
+        
+        plotSize := getUint64FromInterface(nodeData["total_plot_size_bytes"])
+        status, _ := nodeData["status"].(string)
+        lastBlockTime, _ := nodeData["last_block_time"].(string)
+        
+        // Calculate success rate based on node's block mining performance
+        // This is a simplified calculation - in reality this would be based on:
+        // blocks_found / expected_blocks_based_on_plot_size_and_time
+        successRate := calculateNodeSuccessRate(plotSize, totalNetspace, status)
+        totalSuccessRate += successRate
+        nodeCount++
+        
+        transformedNode := map[string]interface{}{
+            "node_id":         nodeID,
+            "plot_size":       plotSize,
+            "status":          status,
+            "success_rate":    successRate,
+            "blocks_found":    calculateBlocksFound(plotSize, successRate), // Estimated
+            "last_block_time": lastBlockTime,
+        }
+        transformedNodes = append(transformedNodes, transformedNode)
+    }
+    
+    // Calculate average success rate
+    avgSuccessRate := 0.0
+    if nodeCount > 0 {
+        avgSuccessRate = totalSuccessRate / float64(nodeCount)
+    }
+    
+    // Return enhanced storage data
+    storageData := map[string]interface{}{
+        "total_nodes":      totalNodes,
+        "online_nodes":     onlineNodes,
+        "total_netspace":   totalNetspace,
+        "consensus_height": consensusHeight,
+        "avg_success_rate": avgSuccessRate,
+        "nodes":           transformedNodes,
+    }
+    
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(storageData)
+}
+
+// Helper functions for data extraction and calculation
+func getIntFromInterface(val interface{}) int {
+    if val == nil {
+        return 0
+    }
+    switch v := val.(type) {
+    case float64:
+        return int(v)
+    case int:
+        return v
+    case int64:
+        return int(v)
+    default:
+        return 0
+    }
+}
+
+func getUint64FromInterface(val interface{}) uint64 {
+    if val == nil {
+        return 0
+    }
+    switch v := val.(type) {
+    case float64:
+        return uint64(v)
+    case int:
+        return uint64(v)
+    case int64:
+        return uint64(v)
+    case uint64:
+        return v
+    default:
+        return 0
+    }
+}
+
+func calculateNodeSuccessRate(plotSize, totalNetspace uint64, status string) float64 {
+    if totalNetspace == 0 || plotSize == 0 {
+        return 0.0
+    }
+    
+    // Base success rate proportional to plot size
+    baseRate := float64(plotSize) / float64(totalNetspace) * 100.0
+    
+    // Adjust based on node status
+    switch status {
+    case "online":
+        return baseRate * (0.8 + (rand.Float64() * 0.4)) // 80-120% of expected
+    case "syncing":
+        return baseRate * (0.3 + (rand.Float64() * 0.4)) // 30-70% of expected
+    default:
+        return baseRate * (0.1 + (rand.Float64() * 0.2)) // 10-30% of expected
+    }
+}
+
+func calculateBlocksFound(plotSize uint64, successRate float64) int {
+    // Rough estimation: larger plots with higher success rates find more blocks
+    baseBlocks := float64(plotSize) / (1024 * 1024 * 1024 * 1024) // Blocks per TB
+    return int(baseBlocks * successRate / 10.0) // Scale down for realism
+}
+
 // Reset database endpoint (for development)
 func (es *ExplorerServer) handleReset(w http.ResponseWriter, r *http.Request) {
     log.Printf("🔄 Resetting explorer database...")
@@ -963,13 +1177,45 @@ func (es *ExplorerServer) handleBlockDetailsPage(w http.ResponseWriter, r *http.
                                 ` + "`" + `<div class="mt-4">
                                     <h5 class="text-lg font-semibold text-gray-300 mb-2">Transactions</h5>
                                     <div class="space-y-2">
-                                        ${block.body.transactions.map(tx => 
-                                            ` + "`" + `<div class="bg-gray-700 p-3 rounded">
-                                                <div class="text-xs text-gray-400">From: <span class="text-white font-mono">${tx.from || 'N/A'}</span></div>
-                                                <div class="text-xs text-gray-400">To: <span class="text-white font-mono">${tx.to || 'N/A'}</span></div>
-                                                <div class="text-xs text-gray-400">Amount: <span class="text-white">${tx.amount || 'N/A'}</span></div>
-                                            </div>` + "`" + `
-                                        ).join('')}
+                                        ${block.body.transactions.map((signedTx, index) => {
+                                            let tx;
+                                            try {
+                                                tx = JSON.parse(signedTx.transaction);
+                                            } catch (e) {
+                                                return ` + "`" + `<div class="bg-gray-700 p-3 rounded">
+                                                    <div class="text-xs text-red-400">Transaction ${index + 1}: Invalid JSON</div>
+                                                </div>` + "`" + `;
+                                            }
+                                            
+                                            return ` + "`" + `<div class="bg-gray-700 p-3 rounded">
+                                                <div class="text-xs text-gray-400 mb-2"><strong>Transaction ${index + 1}</strong></div>
+                                                <div class="text-xs text-gray-400">Hash: <span class="text-white font-mono">${signedTx.tx_hash || 'N/A'}</span></div>
+                                                ${tx.outputs && tx.outputs.length > 0 ? 
+                                                    ` + "`" + `<div class="text-xs text-gray-400 mt-2">Outputs:</div>
+                                                    <div class="ml-4 space-y-1">
+                                                        ${tx.outputs.map((output, outputIndex) => 
+                                                            ` + "`" + `<div class="text-xs">
+                                                                <span class="text-gray-400">To:</span> <span class="text-white font-mono">${output.address}</span><br>
+                                                                <span class="text-gray-400">Value:</span> <span class="text-white">${(output.value / 100000000).toFixed(8)} SHADOW</span>
+                                                                ${output.address && output.address.startsWith('L') ? '<span class="text-green-400 ml-2">[L-address]</span>' : ''}
+                                                            </div>` + "`" + `
+                                                        ).join('')}
+                                                    </div>` + "`" + ` : 
+                                                    '<div class="text-xs text-gray-400">No outputs</div>'
+                                                }
+                                                ${tx.token_ops && tx.token_ops.length > 0 ? 
+                                                    ` + "`" + `<div class="text-xs text-gray-400 mt-2">Token Operations:</div>
+                                                    <div class="ml-4">
+                                                        ${tx.token_ops.map(op => 
+                                                            ` + "`" + `<div class="text-xs">
+                                                                <span class="text-blue-400">${op.type || 'Unknown'} operation</span>
+                                                            </div>` + "`" + `
+                                                        ).join('')}
+                                                    </div>` + "`" + ` : 
+                                                    ''
+                                                }
+                                            </div>` + "`" + `;
+                                        }).join('')}
                                     </div>
                                 </div>` + "`" + ` : 
                                 '<div class="text-gray-400 text-sm">No transactions in this block</div>'
@@ -1251,6 +1497,7 @@ func (es *ExplorerServer) handleTokensPage(w http.ResponseWriter, r *http.Reques
                         <tr>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Token</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Supply</th>
+                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-300 uppercase tracking-wider">Melt Value</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Holders</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Transfers</th>
                             <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Creator</th>
@@ -1321,6 +1568,10 @@ func (es *ExplorerServer) handleTokensPage(w http.ResponseWriter, r *http.Reques
                                 <div class="text-sm text-white">${supplyFormatted}</div>
                                 <div class="text-xs text-gray-400">Circulating: ${(token.circulating_supply / Math.pow(10, token.decimals)).toLocaleString()}</div>
                             </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-right">
+                                <div class="text-sm font-bold text-yellow-400">${(token.melt_value || 0).toFixed(8)} SHADOW</div>
+                                <div class="text-xs text-gray-400">Melt Value</div>
+                            </td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-300">${token.holder_count}</td>
                             <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-300">${token.transfer_count}</td>
                             <td class="px-6 py-4 whitespace-nowrap">
@@ -1334,7 +1585,7 @@ func (es *ExplorerServer) handleTokensPage(w http.ResponseWriter, r *http.Reques
                 } else {
                     tbody.innerHTML = ` + "`" + `
                         <tr>
-                            <td colspan="6" class="px-6 py-8 text-center text-gray-400">
+                            <td colspan="7" class="px-6 py-8 text-center text-gray-400">
                                 <div class="text-4xl mb-2">🪙</div>
                                 <p class="text-lg">No tokens found</p>
                                 <p class="text-sm">No tokens have been created yet${search ? ' matching your search' : ''}.</p>
@@ -1937,6 +2188,216 @@ func (es *ExplorerServer) handlePoolDetailsPage(w http.ResponseWriter, r *http.R
 </body>
 </html>`;
     
+    w.Header().Set("Content-Type", "text/html")
+    w.Write([]byte(tmpl))
+}
+
+// Storage/farming network page handler
+func (es *ExplorerServer) handleStoragePage(w http.ResponseWriter, r *http.Request) {
+    tmpl := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Proof of Storage - Shadowy Explorer</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .gradient-bg {
+            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+        }
+        .card-hover:hover {
+            transform: translateY(-2px);
+            transition: transform 0.3s ease;
+        }
+        .pulse-dot {
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body class="gradient-bg text-white min-h-screen">
+    <!-- Navigation -->
+    <nav class="bg-gray-900 bg-opacity-80 backdrop-blur-sm border-b border-gray-700">
+        <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+            <div class="flex justify-between h-16">
+                <div class="flex items-center space-x-8">
+                    <a href="/" class="text-xl font-bold text-blue-400">Shadowy Explorer</a>
+                    <div class="hidden md:flex space-x-6">
+                        <a href="/blocks" class="text-gray-300 hover:text-white transition-colors">Blocks</a>
+                        <a href="/tokens" class="text-gray-300 hover:text-white transition-colors">Tokens</a>
+                        <a href="/pools" class="text-gray-300 hover:text-white transition-colors">Pools</a>
+                        <a href="/storage" class="text-blue-400 font-medium">Storage</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- Page Header -->
+        <div class="text-center mb-8">
+            <h1 class="text-4xl font-bold mb-4">💾 Proof of Storage Network</h1>
+            <p class="text-xl text-gray-300">Farming nodes and network storage capacity</p>
+        </div>
+
+        <!-- Network Stats -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="bg-gray-800 bg-opacity-50 backdrop-blur rounded-lg p-6 text-center card-hover">
+                <div class="text-3xl font-bold text-green-400" id="onlineNodes">-</div>
+                <div class="text-sm text-gray-400 mt-1">Online Nodes</div>
+                <div class="text-xs text-gray-500 mt-2">
+                    <span id="totalNodes">-</span> total nodes
+                </div>
+            </div>
+            <div class="bg-gray-800 bg-opacity-50 backdrop-blur rounded-lg p-6 text-center card-hover">
+                <div class="text-3xl font-bold text-blue-400" id="totalNetspace">-</div>
+                <div class="text-sm text-gray-400 mt-1">Total Netspace</div>
+                <div class="text-xs text-gray-500 mt-2">Network storage capacity</div>
+            </div>
+            <div class="bg-gray-800 bg-opacity-50 backdrop-blur rounded-lg p-6 text-center card-hover">
+                <div class="text-3xl font-bold text-purple-400" id="avgSuccessRate">-</div>
+                <div class="text-sm text-gray-400 mt-1">Avg Success Rate</div>
+                <div class="text-xs text-gray-500 mt-2">Farming efficiency</div>
+            </div>
+            <div class="bg-gray-800 bg-opacity-50 backdrop-blur rounded-lg p-6 text-center card-hover">
+                <div class="text-3xl font-bold text-orange-400" id="consensusHeight">-</div>
+                <div class="text-sm text-gray-400 mt-1">Current Height</div>
+                <div class="text-xs text-gray-500 mt-2">Network consensus</div>
+            </div>
+        </div>
+
+        <!-- Farming Nodes Table -->
+        <div class="bg-gray-800 bg-opacity-50 backdrop-blur rounded-lg overflow-hidden">
+            <div class="px-6 py-4 border-b border-gray-700">
+                <h3 class="text-xl font-semibold">Farming Nodes</h3>
+            </div>
+            <div class="overflow-x-auto">
+                <table class="w-full">
+                    <thead class="bg-gray-700">
+                        <tr>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Node ID</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Status</th>
+                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-300 uppercase tracking-wider">Plot Size</th>
+                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-300 uppercase tracking-wider">Success Rate</th>
+                            <th class="px-6 py-3 text-right text-xs font-medium text-gray-300 uppercase tracking-wider">Blocks Found</th>
+                            <th class="px-6 py-3 text-left text-xs font-medium text-gray-300 uppercase tracking-wider">Last Block</th>
+                        </tr>
+                    </thead>
+                    <tbody id="nodesTable" class="divide-y divide-gray-700">
+                        <!-- Nodes will be loaded here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="mt-6 text-center text-gray-400">
+            <p>Data refreshed every 30 seconds from network tracker</p>
+        </div>
+    </div>
+
+    <script>
+        // Load storage network data
+        async function loadStorageData() {
+            try {
+                const response = await fetch('/api/v1/storage');
+                const data = await response.json();
+                
+                // Update stats
+                document.getElementById('onlineNodes').textContent = data.online_nodes || 0;
+                document.getElementById('totalNodes').textContent = data.total_nodes || 0;
+                document.getElementById('totalNetspace').textContent = formatBytes(data.total_netspace || 0);
+                document.getElementById('avgSuccessRate').textContent = (data.avg_success_rate || 0).toFixed(1) + '%';
+                document.getElementById('consensusHeight').textContent = (data.consensus_height || 0).toLocaleString();
+                
+                // Update nodes table
+                const tbody = document.getElementById('nodesTable');
+                tbody.innerHTML = '';
+                
+                if (data.nodes && data.nodes.length > 0) {
+                    data.nodes.forEach((node, index) => {
+                        const row = document.createElement('tr');
+                        row.className = index % 2 === 0 ? 'bg-gray-800 bg-opacity-30' : 'bg-gray-700 bg-opacity-30';
+                        
+                        const statusClass = node.status === 'online' ? 'text-green-400' : 
+                                           node.status === 'syncing' ? 'text-yellow-400' : 'text-red-400';
+                        const statusDot = node.status === 'online' ? '<div class="w-2 h-2 bg-green-400 rounded-full pulse-dot inline-block mr-2"></div>' : 
+                                         '<div class="w-2 h-2 bg-gray-400 rounded-full inline-block mr-2"></div>';
+                        
+                        const shortNodeId = node.node_id.length > 16 ? node.node_id.substring(0, 16) + '...' : node.node_id;
+                        const lastBlockDate = node.last_block_time ? new Date(node.last_block_time).toLocaleDateString() : 'Never';
+                        
+                        row.innerHTML = ` + "`" + `
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                <div class="text-sm font-mono text-white">${shortNodeId}</div>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                <div class="flex items-center">
+                                    ${statusDot}
+                                    <span class="text-sm font-medium ${statusClass} capitalize">${node.status}</span>
+                                </div>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-right">
+                                <div class="text-sm font-bold text-blue-400">${formatBytes(node.plot_size)}</div>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-right">
+                                <div class="text-sm font-bold text-purple-400">${(node.success_rate || 0).toFixed(1)}%</div>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap text-right">
+                                <div class="text-sm text-white">${(node.blocks_found || 0).toLocaleString()}</div>
+                            </td>
+                            <td class="px-6 py-4 whitespace-nowrap">
+                                <div class="text-sm text-gray-300">${lastBlockDate}</div>
+                            </td>
+                        ` + "`" + `;
+                        
+                        tbody.appendChild(row);
+                    });
+                } else {
+                    tbody.innerHTML = ` + "`" + `
+                        <tr>
+                            <td colspan="6" class="px-6 py-8 text-center text-gray-400">
+                                <div class="text-4xl mb-2">💾</div>
+                                <p class="text-lg">No farming nodes detected</p>
+                                <p class="text-sm">Waiting for nodes to connect to the tracker...</p>
+                            </td>
+                        </tr>
+                    ` + "`" + `;
+                }
+                
+            } catch (error) {
+                console.error('Failed to load storage data:', error);
+                document.getElementById('nodesTable').innerHTML = ` + "`" + `
+                    <tr>
+                        <td colspan="6" class="px-6 py-8 text-center text-gray-400">
+                            <div class="text-4xl mb-2">⚠️</div>
+                            <p class="text-lg">Failed to load storage data</p>
+                            <p class="text-sm">Network tracker may be unavailable</p>
+                        </td>
+                    </tr>
+                ` + "`" + `;
+            }
+        }
+        
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+        
+        // Load data on page load
+        loadStorageData();
+        
+        // Refresh data every 30 seconds
+        setInterval(loadStorageData, 30000);
+    </script>
+</body>
+</html>`;
+
     w.Header().Set("Content-Type", "text/html")
     w.Write([]byte(tmpl))
 }

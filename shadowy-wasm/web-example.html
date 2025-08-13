@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shadowy WASM Web Example</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, monospace;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #1a1a1a;
+            color: #e0e0e0;
+        }
+        .container {
+            background: #2d2d2d;
+            padding: 30px;
+            border-radius: 10px;
+            margin-bottom: 20px;
+            border: 1px solid #444;
+        }
+        h1 { color: #4a9eff; margin-top: 0; }
+        h2 { color: #ffa500; border-bottom: 1px solid #444; padding-bottom: 10px; }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #ccc;
+            font-weight: bold;
+        }
+        input[type="text"], input[type="url"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #555;
+            border-radius: 4px;
+            background: #1a1a1a;
+            color: #e0e0e0;
+            font-family: monospace;
+        }
+        button {
+            background: #4a9eff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        button:hover { background: #357abd; }
+        button:disabled { 
+            background: #666; 
+            cursor: not-allowed; 
+        }
+        .output {
+            background: #1a1a1a;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 15px;
+            margin: 10px 0;
+            font-family: monospace;
+            font-size: 12px;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .success { color: #28a745; }
+        .error { color: #dc3545; }
+        .info { color: #17a2b8; }
+        .loading {
+            color: #ffc107;
+        }
+        .status {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 11px;
+            font-weight: bold;
+            margin-left: 10px;
+        }
+        .status.connected { background: #28a745; color: white; }
+        .status.disconnected { background: #dc3545; color: white; }
+        .status.loading { background: #ffc107; color: black; }
+        .balance-display {
+            background: #2d2d2d;
+            border: 2px solid #4a9eff;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 15px 0;
+        }
+        .balance-amount {
+            font-size: 24px;
+            font-weight: bold;
+            color: #4a9eff;
+            margin-bottom: 10px;
+        }
+        .balance-details {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+        .balance-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid #444;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🌟 Shadowy WASM Web3 Example</h1>
+        <p>This demonstrates the same WASM library used by the CLI, running in a web browser for Web3 applications.</p>
+        
+        <div class="form-group">
+            <label for="nodeUrl">Node URL:</label>
+            <input type="url" id="nodeUrl" value="http://localhost:8080" placeholder="http://localhost:8080 or https://api.shadowy.network">
+        </div>
+        
+        <div class="form-group">
+            <label for="apiKey">API Key (for remote nodes):</label>
+            <input type="text" id="apiKey" placeholder="sk-your-api-key-here (optional for localhost)">
+        </div>
+        
+        <button onclick="loadWASM()">🔧 Load WASM Library</button>
+        <button onclick="connectToNode()" id="connectBtn" disabled>📡 Connect to Node</button>
+        <span id="connectionStatus" class="status disconnected">Disconnected</span>
+        
+        <div id="output1" class="output">Click "Load WASM Library" to begin...</div>
+    </div>
+    
+    <div class="container">
+        <h2>💰 Wallet Operations</h2>
+        
+        <div class="form-group">
+            <label for="walletAddress">Wallet Address:</label>
+            <input type="text" id="walletAddress" placeholder="S427a724d41e3a5a03d1f83553134239813272bc2c4b2d50737" style="font-size: 12px;">
+        </div>
+        
+        <button onclick="getBalance()" id="balanceBtn" disabled>💰 Get Balance</button>
+        <button onclick="getNodeInfo()" id="nodeInfoBtn" disabled>📊 Node Info</button>
+        
+        <div id="balanceResult"></div>
+        <div id="output2" class="output">Connect to a node first...</div>
+    </div>
+
+    <script src="wasm_exec.js"></script>
+    <script>
+        let wasmLoaded = false;
+        let connected = false;
+        
+        function log(message, className = '') {
+            const output = document.getElementById('output2');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = `[${timestamp}] ${message}\n`;
+            
+            if (className) {
+                output.innerHTML += `<span class="${className}">${logEntry}</span>`;
+            } else {
+                output.innerHTML += logEntry;
+            }
+            
+            output.scrollTop = output.scrollBottom;
+        }
+        
+        function log1(message, className = '') {
+            const output = document.getElementById('output1');
+            const timestamp = new Date().toLocaleTimeString();
+            const logEntry = `[${timestamp}] ${message}\n`;
+            
+            if (className) {
+                output.innerHTML += `<span class="${className}">${logEntry}</span>`;
+            } else {
+                output.innerHTML += logEntry;
+            }
+            
+            output.scrollTop = output.scrollBottom;
+        }
+        
+        function updateStatus(status, text) {
+            const statusEl = document.getElementById('connectionStatus');
+            statusEl.className = `status ${status}`;
+            statusEl.textContent = text;
+        }
+        
+        async function loadWASM() {
+            log1('🔧 Loading Shadowy WASM library...', 'loading');
+            
+            try {
+                // Load WASM module
+                const go = new Go();
+                const result = await WebAssembly.instantiateStreaming(fetch('shadowy.wasm'), go.importObject);
+                go.run(result.instance);
+                
+                // Wait for initialization
+                await new Promise(resolve => setTimeout(resolve, 200));
+                
+                wasmLoaded = true;
+                log1('✅ WASM library loaded successfully!', 'success');
+                log1('🚀 Shadowy WASM functions are now available', 'info');
+                
+                // Enable connect button
+                document.getElementById('connectBtn').disabled = false;
+                
+            } catch (error) {
+                log1(`❌ Failed to load WASM: ${error.message}`, 'error');
+            }
+        }
+        
+        async function connectToNode() {
+            if (!wasmLoaded) {
+                log1('❌ WASM library not loaded', 'error');
+                return;
+            }
+            
+            const nodeUrl = document.getElementById('nodeUrl').value;
+            const apiKey = document.getElementById('apiKey').value;
+            
+            log1(`📡 Connecting to node: ${nodeUrl}`, 'loading');
+            updateStatus('loading', 'Connecting...');
+            
+            try {
+                // Create client
+                const createResult = shadowy_create_client(nodeUrl);
+                if (!createResult.success) {
+                    throw new Error(createResult.error);
+                }
+                log1('✅ Client created', 'success');
+                
+                // Set API key if provided
+                if (apiKey) {
+                    const keyResult = shadowy_set_api_key(apiKey);
+                    if (!keyResult.success) {
+                        throw new Error(keyResult.error);
+                    }
+                    log1('🔐 API key configured', 'success');
+                }
+                
+                // Test connection
+                const connectionTest = await shadowy_test_connection();
+                log1('✅ Connection successful!', 'success');
+                
+                if (connectionTest.node_info) {
+                    log1(`   Node version: ${connectionTest.node_info.version || 'Unknown'}`, 'info');
+                    log1(`   Chain height: ${connectionTest.node_info.chain_height || 0}`, 'info');
+                    log1(`   Chain ID: ${connectionTest.node_info.chain_id || 'Unknown'}`, 'info');
+                }
+                
+                connected = true;
+                updateStatus('connected', 'Connected');
+                
+                // Enable wallet operation buttons
+                document.getElementById('balanceBtn').disabled = false;
+                document.getElementById('nodeInfoBtn').disabled = false;
+                
+                // Set example address if empty
+                const addressInput = document.getElementById('walletAddress');
+                if (!addressInput.value) {
+                    addressInput.value = 'S427a724d41e3a5a03d1f83553134239813272bc2c4b2d50737';
+                }
+                
+            } catch (error) {
+                log1(`❌ Connection failed: ${error.error || error.message}`, 'error');
+                updateStatus('disconnected', 'Connection Failed');
+            }
+        }
+        
+        async function getBalance() {
+            if (!connected) {
+                log('❌ Not connected to node', 'error');
+                return;
+            }
+            
+            const address = document.getElementById('walletAddress').value;
+            if (!address) {
+                log('❌ Please enter a wallet address', 'error');
+                return;
+            }
+            
+            log(`💰 Getting balance for: ${address.substring(0, 20)}...`, 'loading');
+            
+            try {
+                const balance = await shadowy_get_balance(address);
+                log('✅ Balance retrieved successfully', 'success');
+                
+                // Display formatted balance
+                displayBalance(balance);
+                
+                // Log details
+                log(`   Confirmed: ${(balance.confirmed_balance_satoshi / 100000000).toFixed(8)} SHADOW`, 'info');
+                log(`   Pending: ${(balance.pending_balance_satoshi / 100000000).toFixed(8)} SHADOW`, 'info');
+                log(`   Transactions: ${balance.transaction_count}`, 'info');
+                
+            } catch (error) {
+                log(`❌ Balance lookup failed: ${error.error || error.message}`, 'error');
+                document.getElementById('balanceResult').innerHTML = '';
+            }
+        }
+        
+        function displayBalance(balance) {
+            const balanceHtml = `
+                <div class="balance-display">
+                    <div class="balance-amount">${balance.formatted_balance || '0.00000000 SHADOW'}</div>
+                    <div class="balance-details">
+                        <div class="balance-item">
+                            <span>Confirmed:</span>
+                            <span>${(balance.confirmed_balance_satoshi / 100000000).toFixed(8)} SHADOW</span>
+                        </div>
+                        <div class="balance-item">
+                            <span>Pending:</span>
+                            <span>${(balance.pending_balance_satoshi / 100000000).toFixed(8)} SHADOW</span>
+                        </div>
+                        <div class="balance-item">
+                            <span>Total Received:</span>
+                            <span>${(balance.total_received_satoshi / 100000000).toFixed(8)} SHADOW</span>
+                        </div>
+                        <div class="balance-item">
+                            <span>Total Sent:</span>
+                            <span>${(balance.total_sent_satoshi / 100000000).toFixed(8)} SHADOW</span>
+                        </div>
+                        <div class="balance-item">
+                            <span>Transactions:</span>
+                            <span>${balance.transaction_count}</span>
+                        </div>
+                        <div class="balance-item">
+                            <span>Address:</span>
+                            <span style="font-family: monospace; font-size: 11px; word-break: break-all;">${balance.address}</span>
+                        </div>
+                    </div>
+                </div>
+            `;
+            
+            document.getElementById('balanceResult').innerHTML = balanceHtml;
+        }
+        
+        async function getNodeInfo() {
+            if (!connected) {
+                log('❌ Not connected to node', 'error');
+                return;
+            }
+            
+            log('📊 Getting node information...', 'loading');
+            
+            try {
+                const info = await shadowy_get_node_info();
+                log('✅ Node info retrieved successfully', 'success');
+                log(`   Chain Height: ${info.tip_height || 0}`, 'info');
+                log(`   Total Blocks: ${info.total_blocks || 0}`, 'info');
+                log(`   Total Transactions: ${info.total_transactions || 0}`, 'info');
+                log(`   Status: ${info.status || 'Unknown'}`, 'info');
+                
+                if (info.version) {
+                    log(`   Version: ${info.version}`, 'info');
+                }
+                
+            } catch (error) {
+                log(`❌ Node info failed: ${error.error || error.message}`, 'error');
+            }
+        }
+        
+        // Auto-populate example address on page load
+        window.onload = function() {
+            log1('🌟 Shadowy WASM Web3 Example loaded');
+            log1('💡 This same WASM library powers the CLI tool');
+            log1('   Click "Load WASM Library" to begin', 'info');
+        };
+    </script>
+</body>
+</html>

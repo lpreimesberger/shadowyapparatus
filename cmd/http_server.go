@@ -20,7 +20,7 @@ func (sn *ShadowNode) initializeHTTPServer() error {
 	v1 := router.PathPrefix("/api/v1").Subrouter()
 
 	// Health and status endpoints
-	v1.HandleFunc("/health", sn.handleHealth).Methods("GET")
+	v1.HandleFunc("/health", sn.handleHealth).Methods("GET", "OPTIONS")
 	v1.HandleFunc("/status", sn.handleStatus).Methods("GET")
 	v1.HandleFunc("/version", sn.handleVersion).Methods("GET")
 
@@ -93,6 +93,9 @@ func (sn *ShadowNode) initializeHTTPServer() error {
 
 	// Address balance endpoint (for addresses without wallet files)
 	v1.HandleFunc("/address/{address}/balance", sn.handleGetAddressBalance).Methods("GET")
+	
+	// UTXO endpoint for address
+	v1.HandleFunc("/utxos", sn.handleGetUTXOs).Methods("GET")
 
 	// Transaction utilities
 	utils := v1.PathPrefix("/utils").Subrouter()
@@ -139,6 +142,16 @@ func (sn *ShadowNode) initializeHTTPServer() error {
 	// Liquidity pool endpoints
 	router.HandleFunc("/api/pools", sn.handlePoolsList).Methods("GET")
 	router.HandleFunc("/api/pool/create", sn.handlePoolCreate).Methods("POST")
+	
+	// LP Swap endpoints
+	webwallet.HandleFunc("/swap", sn.handleWebWalletSwapInterface).Methods("GET")
+	webwallet.HandleFunc("/swap", sn.handleWebWalletSubmitSwap).Methods("POST")
+
+	// Web Wallet Interface (/web/wallet routes for consistency)
+	webwalletWeb := router.PathPrefix("/web/wallet").Subrouter()
+	webwalletWeb.HandleFunc("/", sn.handleWebWallet).Methods("GET")
+	webwalletWeb.HandleFunc("/swap", sn.handleWebWalletSwapInterface).Methods("GET")
+	webwalletWeb.HandleFunc("/swap", sn.handleWebWalletSubmitSwap).Methods("POST")
 
 	// Add CORS middleware
 	router.Use(corsMiddleware)
@@ -1669,6 +1682,12 @@ func (sn *ShadowNode) handlePoolsList(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			
+			// Get current pool reserves
+			var reserveA, reserveB uint64
+			if tokenExecutor := sn.blockchain.GetTokenExecutor(); tokenExecutor != nil {
+				reserveA, reserveB = tokenExecutor.GetPoolReserves(poolData, poolData.LAddress)
+			}
+			
 			pool := map[string]interface{}{
 				"id":           tokenID,
 				"name":         metadata.Name,
@@ -1684,6 +1703,9 @@ func (sn *ShadowNode) handlePoolsList(w http.ResponseWriter, r *http.Request) {
 				"share_token_id": poolData.ShareTokenID,
 				"creator":      poolData.Creator,
 				"creation_time": poolData.CreationTime,
+				"reserve_a":    reserveA,
+				"reserve_b":    reserveB,
+				"can_swap":     reserveA > 0 && reserveB > 0,
 			}
 			
 			pools = append(pools, pool)
@@ -1871,4 +1893,119 @@ func (sn *ShadowNode) handlePoolCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	json.NewEncoder(w).Encode(response)
+}
+
+// UTXO structure for API response
+type UTXOResponse struct {
+	TxID         string `json:"txid"`
+	Vout         uint32 `json:"vout"`
+	Value        uint64 `json:"value"`
+	ScriptPubkey string `json:"script_pubkey"`
+	Address      string `json:"address"`
+	Confirmations int   `json:"confirmations"`
+}
+
+// Get UTXOs for address endpoint
+func (sn *ShadowNode) handleGetUTXOs(w http.ResponseWriter, r *http.Request) {
+	// Get address from query parameter
+	address := r.URL.Query().Get("address")
+	if address == "" {
+		http.Error(w, "Address parameter required", http.StatusBadRequest)
+		return
+	}
+
+	// Validate address format
+	if !IsValidAddress(address) {
+		http.Error(w, "Invalid address format", http.StatusBadRequest)
+		return
+	}
+
+	if sn.blockchain == nil {
+		http.Error(w, "Blockchain not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Get UTXOs for the address
+	utxos, err := sn.getAddressUTXOs(address)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get UTXOs: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(utxos)
+}
+
+// getAddressUTXOs scans the blockchain to find unspent transaction outputs for an address
+func (sn *ShadowNode) getAddressUTXOs(address string) ([]UTXOResponse, error) {
+	var utxos []UTXOResponse
+	spentOutputs := make(map[string]bool) // Track spent outputs: "txid:vout" -> true
+	
+	stats := sn.blockchain.GetStats()
+	
+	// First pass: find all spent outputs by scanning all transaction inputs
+	for height := uint64(1); height <= stats.TipHeight; height++ { // Skip genesis block
+		block, err := sn.blockchain.GetBlockByHeight(height)
+		if err != nil {
+			continue
+		}
+		
+		for _, signedTx := range block.Body.Transactions {
+			var tx Transaction
+			if err := json.Unmarshal(signedTx.Transaction, &tx); err != nil {
+				continue
+			}
+			
+			// Mark all inputs as spent
+			for _, input := range tx.Inputs {
+				spentKey := fmt.Sprintf("%s:%d", input.PreviousTxHash, input.OutputIndex)
+				spentOutputs[spentKey] = true
+			}
+		}
+	}
+	
+	// Second pass: find all outputs for this address and check if they're unspent
+	for height := uint64(0); height <= stats.TipHeight; height++ {
+		block, err := sn.blockchain.GetBlockByHeight(height)
+		if err != nil {
+			continue
+		}
+		
+		for _, signedTx := range block.Body.Transactions {
+			var tx Transaction
+			if err := json.Unmarshal(signedTx.Transaction, &tx); err != nil {
+				continue
+			}
+			
+			// Check all outputs for this address
+			for outputIndex, output := range tx.Outputs {
+				if output.Address == address {
+					// Create UTXO key to check if spent
+					utxoKey := fmt.Sprintf("%s:%d", signedTx.TxHash, outputIndex)
+					
+					// Only include if not spent
+					if !spentOutputs[utxoKey] {
+						// Calculate confirmations
+						confirmations := int(stats.TipHeight - height + 1)
+						
+						// Generate script pubkey (simplified)
+						scriptPubkey := fmt.Sprintf("OP_DUP OP_HASH160 %s OP_EQUALVERIFY OP_CHECKSIG", address[1:41])
+						if len(address) > 41 {
+							scriptPubkey = fmt.Sprintf("OP_DUP OP_HASH160 %s OP_EQUALVERIFY OP_CHECKSIG", address[1:41])
+						}
+						
+						utxos = append(utxos, UTXOResponse{
+							TxID:         signedTx.TxHash,
+							Vout:         uint32(outputIndex),
+							Value:        output.Value,
+							ScriptPubkey: scriptPubkey,
+							Address:      address,
+							Confirmations: confirmations,
+						})
+					}
+				}
+			}
+		}
+	}
+	
+	return utxos, nil
 }

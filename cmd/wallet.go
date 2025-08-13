@@ -1034,6 +1034,23 @@ func IsValidAddress(address string) bool {
 	}
 }
 
+// IsValidLAddress validates specifically L-addresses (liquidity pool addresses)
+func IsValidLAddress(address string) bool {
+	// L-addresses are exactly 41 characters: L + 40 hex chars
+	if len(address) != 41 {
+		return false
+	}
+	
+	// Must start with 'L'
+	if address[0] != 'L' {
+		return false
+	}
+	
+	// Verify the remaining 40 characters are valid hex
+	_, err := hex.DecodeString(address[1:])
+	return err == nil
+}
+
 // calculateChecksum computes 4-byte checksum using double SHA256
 func calculateChecksum(data []byte) []byte {
 	// First SHA256

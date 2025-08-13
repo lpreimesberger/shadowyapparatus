@@ -13,7 +13,7 @@ import (
 
 var resetCmd = &cobra.Command{
 	Use:   "reset",
-	Short: "Reset blockchain node to fresh state with new genesis block",
+	Short: "Reset blockchain node to fresh state",
 	Long: `Reset completely removes all blockchain data and creates a fresh genesis block.
 This will delete:
 - All blockchain data (blocks, genesis)
@@ -98,13 +98,80 @@ Wallet files are preserved by default.`,
 	},
 }
 
+var resetSyncCmd = &cobra.Command{
+	Use:   "sync",
+	Short: "Nuclear reset for stuck blockchain sync (cat knocking stuff off counter)",
+	Long: `Nuclear reset completely wipes blockchain data when node is stuck in sync loops.
+
+This is the "cat knocking stuff off the counter" solution for when your node:
+- Keeps finding the same invalid blocks
+- Gets stuck at the same height for hours/days  
+- Needs to start completely fresh from genesis
+
+This is less destructive than full reset - it only touches blockchain data.
+Plot files, wallets, and config are preserved.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		fmt.Println("☢️  NUCLEAR SYNC RESET")
+		fmt.Println("====================")
+		fmt.Println("🙀 *Cat approaching the counter...*")
+		fmt.Println("")
+		fmt.Println("This will completely wipe blockchain data and force a fresh sync.")
+		fmt.Println("Use this when your node is stuck in sync hell at the same height.")
+		fmt.Println("")
+		fmt.Println("💾 Preserves: wallets, plots, config")
+		fmt.Println("🗑️  Destroys: all blocks, token state, syndicate data")
+
+		// Get force flag
+		force, _ := cmd.Flags().GetBool("force")
+		if !force && !confirmAction("Ready to knock everything off the counter?") {
+			fmt.Println("❌ Nuclear reset cancelled")
+			return
+		}
+
+		// Load config and initialize blockchain to use nuclear reset
+		config, err := loadConfig()
+		if err != nil {
+			log.Fatalf("Failed to load configuration: %v", err)
+		}
+
+		fmt.Println("\n🙀 *SWIPE* - Knocking everything off the counter...")
+		
+		// Directly wipe blockchain directory (don't load it first!)
+		blockchainDir := config.BlockchainDirectory
+		if err := os.RemoveAll(blockchainDir); err != nil {
+			log.Fatalf("Failed to remove blockchain directory: %v", err)
+		}
+		fmt.Printf("☢️  Wiped blockchain directory: %s\n", blockchainDir)
+		
+		// Recreate the directory structure
+		if err := os.MkdirAll(blockchainDir, 0755); err != nil {
+			log.Fatalf("Failed to recreate blockchain directory: %v", err)
+		}
+		
+		// Also wipe token data
+		tokenDir := filepath.Join(blockchainDir, "tokens")
+		if err := os.MkdirAll(tokenDir, 0755); err != nil {
+			log.Fatalf("Failed to recreate token directory: %v", err)
+		}
+		fmt.Printf("☢️  Reset token directory: %s\n", tokenDir)
+
+		fmt.Println("\n✅ Nuclear reset complete!")
+		fmt.Println("🐱 Counter is now clear - your node can start fresh")
+		fmt.Println("🚀 Start your node again to begin syncing from genesis")
+	},
+}
+
 func init() {
 	rootCmd.AddCommand(resetCmd)
+	resetCmd.AddCommand(resetSyncCmd)
 	
 	// Add flags for more control
 	resetCmd.Flags().Bool("include-wallets", false, "Also remove wallet files (DANGEROUS)")
 	resetCmd.Flags().Bool("include-config", false, "Also reset configuration to defaults")
 	resetCmd.Flags().Bool("force", false, "Skip confirmation prompts")
+	
+	// Add flags for nuclear sync reset
+	resetSyncCmd.Flags().Bool("force", false, "Skip confirmation prompts")
 }
 
 // confirmAction prompts the user for confirmation

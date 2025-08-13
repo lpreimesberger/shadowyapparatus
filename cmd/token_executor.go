@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"log"
+	"time"
 )
 
 // TokenExecutor handles the execution of token operations during transaction processing
@@ -83,6 +84,8 @@ func (te *TokenExecutor) executeTokenOperation(tokenOp TokenOperation, index int
 		return te.executeSyndicateJoin(tokenOp, index)
 	case POOL_CREATE:
 		return te.executePoolCreate(tokenOp, index)
+	case POOL_SWAP:
+		return te.executePoolSwap(tokenOp, index)
 	default:
 		return nil, fmt.Errorf("unknown token operation type: %d", tokenOp.Type)
 	}
@@ -645,6 +648,179 @@ func (te *TokenExecutor) executePoolCreate(tokenOp TokenOperation, index int) (*
 		ShadowReleased: 0,
 		Success:       true,
 	}, nil
+}
+
+// executePoolSwap processes a pool swap operation with AMM calculations
+func (te *TokenExecutor) executePoolSwap(tokenOp TokenOperation, index int) (*TokenOpResult, error) {
+	log.Printf("🔍 [TOKEN_EXECUTOR] Executing pool swap: %s", tokenOp.TokenID)
+	
+	if tokenOp.Metadata == nil || tokenOp.Metadata.PoolSwap == nil {
+		return nil, fmt.Errorf("POOL_SWAP operation missing swap data")
+	}
+	
+	swap := tokenOp.Metadata.PoolSwap
+	log.Printf("🔍 [TOKEN_EXECUTOR] Swap: %s -> %s via pool %s, amount=%d", 
+		swap.InputTokenID, swap.OutputTokenID, swap.PoolLAddress, tokenOp.Amount)
+	
+	// Check expiration
+	if !swap.NotAfter.IsZero() && swap.NotAfter.Before(time.Now().UTC()) {
+		return nil, fmt.Errorf("swap order has expired")
+	}
+	
+	// Find the pool NFT that owns this L-address
+	poolNFTID, poolData, err := te.findPoolByLAddress(swap.PoolLAddress)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find pool: %w", err)
+	}
+	
+	log.Printf("🔍 [TOKEN_EXECUTOR] Found pool NFT: %s, tokens: %s/%s", 
+		poolNFTID, poolData.TokenA, poolData.TokenB)
+	
+	// Verify this pool can handle the swap
+	if !((swap.InputTokenID == poolData.TokenA && swap.OutputTokenID == poolData.TokenB) ||
+		 (swap.InputTokenID == poolData.TokenB && swap.OutputTokenID == poolData.TokenA)) {
+		return nil, fmt.Errorf("pool %s cannot swap %s to %s", 
+			swap.PoolLAddress, swap.InputTokenID, swap.OutputTokenID)
+	}
+	
+	// Get current pool reserves
+	var inputReserve, outputReserve uint64
+	if swap.InputTokenID == poolData.TokenA {
+		inputReserve, outputReserve = te.GetPoolReserves(poolData, swap.PoolLAddress)
+	} else {
+		outputReserve, inputReserve = te.GetPoolReserves(poolData, swap.PoolLAddress)
+	}
+	
+	log.Printf("🔍 [TOKEN_EXECUTOR] Current reserves - Input: %d, Output: %d", inputReserve, outputReserve)
+	
+	// Calculate AMM output using constant product formula: k = x * y
+	// For input amount deltaX, output amount deltaY = (y * deltaX) / (x + deltaX)
+	// With fee: deltaY = (y * deltaX * (10000 - fee)) / ((x + deltaX) * 10000)
+	inputAmount := tokenOp.Amount
+	feeRate := poolData.FeeRate // fee rate in basis points
+	
+	// Calculate output amount with fee
+	numerator := outputReserve * inputAmount * (10000 - feeRate)
+	denominator := (inputReserve + inputAmount) * 10000
+	
+	if denominator == 0 {
+		return nil, fmt.Errorf("pool has insufficient liquidity")
+	}
+	
+	outputAmount := numerator / denominator
+	if outputAmount == 0 {
+		if outputReserve == 0 {
+			return nil, fmt.Errorf("pool has no liquidity in output token - cannot swap")
+		}
+		return nil, fmt.Errorf("swap amount too small, would result in zero output")
+	}
+	
+	log.Printf("🔍 [TOKEN_EXECUTOR] AMM calculation: %d input -> %d output (fee=%d bp)", 
+		inputAmount, outputAmount, feeRate)
+	
+	// Check slippage protection
+	if swap.MaxSlippage > 0 {
+		// Calculate expected output without fee for slippage calculation
+		expectedOutput := (outputReserve * inputAmount) / (inputReserve + inputAmount)
+		actualSlippage := ((expectedOutput - outputAmount) * 10000) / expectedOutput
+		
+		if actualSlippage > swap.MaxSlippage {
+			return nil, fmt.Errorf("slippage %d bp exceeds maximum %d bp", 
+				actualSlippage, swap.MaxSlippage)
+		}
+	}
+	
+	// Check minimum received amount
+	if swap.MinReceived > 0 && outputAmount < swap.MinReceived {
+		if swap.AllOrNothing {
+			return nil, fmt.Errorf("output %d below minimum %d (all-or-nothing)", 
+				outputAmount, swap.MinReceived)
+		}
+		// Partial execution: reduce input to achieve minimum output
+		// Solve: minOutput = (reserve_out * reduced_input * (10000 - fee)) / ((reserve_in + reduced_input) * 10000)
+		// This requires solving a quadratic equation, for now just fail
+		return nil, fmt.Errorf("partial execution not yet implemented, output %d below minimum %d", 
+			outputAmount, swap.MinReceived)
+	}
+	
+	// Execute the swap
+	log.Printf("🔍 [TOKEN_EXECUTOR] Executing swap: %d %s -> %d %s", 
+		inputAmount, swap.InputTokenID, outputAmount, swap.OutputTokenID)
+	
+	// Transfer input tokens from swapper to pool
+	if swap.InputTokenID == "SHADOW" {
+		// For SHADOW swaps, this would be handled by the blockchain's base transaction processing
+		// We just need to update the pool's "shadow reserves" tracking
+		log.Printf("🔍 [TOKEN_EXECUTOR] SHADOW input handled by base transaction processing")
+	} else {
+		// Transfer tokens from swapper to L-address
+		err = te.tokenState.TransferToken(swap.InputTokenID, swap.SwapperAddress, swap.PoolLAddress, inputAmount)
+		if err != nil {
+			return nil, fmt.Errorf("failed to transfer input tokens to pool: %w", err)
+		}
+	}
+	
+	// Transfer output tokens from pool to swapper
+	if swap.OutputTokenID == "SHADOW" {
+		// For SHADOW output, we need to track this for the blockchain to process
+		// The actual SHADOW transfer will be handled by creating appropriate transaction outputs
+		log.Printf("🔍 [TOKEN_EXECUTOR] SHADOW output of %d will be handled by transaction outputs", outputAmount)
+	} else {
+		// Transfer tokens from L-address to swapper
+		err = te.tokenState.TransferToken(swap.OutputTokenID, swap.PoolLAddress, swap.SwapperAddress, outputAmount)
+		if err != nil {
+			return nil, fmt.Errorf("failed to transfer output tokens from pool: %w", err)
+		}
+	}
+	
+	log.Printf("✅ [TOKEN_EXECUTOR] Pool swap completed: %d %s -> %d %s", 
+		inputAmount, swap.InputTokenID, outputAmount, swap.OutputTokenID)
+	
+	return &TokenOpResult{
+		Index:          index,
+		Type:           POOL_SWAP,
+		TokenID:        tokenOp.TokenID,
+		Amount:         inputAmount,
+		From:           tokenOp.From,
+		To:             tokenOp.To,
+		ShadowLocked:   0, // No shadow locked for swaps
+		ShadowReleased: 0, // Shadow movement handled separately
+		Success:        true,
+	}, nil
+}
+
+// GetPoolReserves returns the current reserves for a pool (tokenA reserve, tokenB reserve)
+func (te *TokenExecutor) GetPoolReserves(poolData *LiquidityPoolData, lAddress string) (uint64, uint64) {
+	var reserveA, reserveB uint64
+	
+	// Get token A balance of the pool
+	if poolData.TokenA == "SHADOW" {
+		// For SHADOW, we need to query the blockchain's UTXO set
+		// For now, assume it's tracked somewhere - this needs integration with blockchain state
+		reserveA = poolData.InitialRatioA // Fallback to initial ratio
+	} else {
+		balance, err := te.tokenState.GetTokenBalance(poolData.TokenA, lAddress)
+		if err != nil {
+			reserveA = 0
+		} else {
+			reserveA = balance
+		}
+	}
+	
+	// Get token B balance of the pool
+	if poolData.TokenB == "SHADOW" {
+		// For SHADOW, we need to query the blockchain's UTXO set
+		reserveB = poolData.InitialRatioB // Fallback to initial ratio
+	} else {
+		balance, err := te.tokenState.GetTokenBalance(poolData.TokenB, lAddress)
+		if err != nil {
+			reserveB = 0
+		} else {
+			reserveB = balance
+		}
+	}
+	
+	return reserveA, reserveB
 }
 
 // rollbackOperations attempts to rollback completed operations (best effort)

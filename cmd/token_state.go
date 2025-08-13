@@ -618,6 +618,15 @@ func (ts *TokenState) MintTokensTo(tokenID string, amount uint64, toAddress stri
 	log.Printf("Minted %d tokens of %s to %s, new total supply: %d", amount, tokenID, recipient, token.TotalSupply)
 	log.Printf("🔍 [TOKEN_STATE] Recipient %s now has balance: %d", recipient, ts.balances[tokenID][recipient])
 	
-	// Save state
-	return ts.saveState()
+	// Save state (create snapshot while we still hold the write lock)
+	log.Printf("🔍 [TOKEN_STATE] About to create snapshot while holding write lock...")
+	snapshot := ts.createSnapshotUnsafe(0) // Create snapshot without acquiring lock
+	log.Printf("🔍 [TOKEN_STATE] Calling saveStateWithSnapshot()...")
+	err := ts.saveStateWithSnapshot(snapshot)
+	if err != nil {
+		log.Printf("❌ [TOKEN_STATE] saveStateWithSnapshot() failed: %v", err)
+		return err
+	}
+	log.Printf("✅ [TOKEN_STATE] saveStateWithSnapshot() completed successfully after minting")
+	return nil
 }

@@ -428,6 +428,67 @@ func (mp *Mempool) CleanupExpiredTransactions() int {
 	return expiredCount
 }
 
+// CleanupExpiredSwapOrders removes pool swap transactions that have exceeded their NotAfter expiration time
+func (mp *Mempool) CleanupExpiredSwapOrders() int {
+	mp.mu.Lock()
+	defer mp.mu.Unlock()
+	
+	expiredCount := 0
+	currentTime := time.Now().UTC()
+	
+	for txHash, mempoolTx := range mp.transactions {
+		// Parse transaction to check if it's a POOL_SWAP
+		var parsedTx Transaction
+		if err := json.Unmarshal(mempoolTx.Transaction.Transaction, &parsedTx); err != nil {
+			continue // Skip if we can't parse
+		}
+		
+		// Check each token operation for POOL_SWAP with expiration
+		for _, tokenOp := range parsedTx.TokenOps {
+			if tokenOp.Type == POOL_SWAP && tokenOp.Metadata != nil && tokenOp.Metadata.PoolSwap != nil {
+				swap := tokenOp.Metadata.PoolSwap
+				
+				// Check if swap has expired (NotAfter is in the past)
+				if !swap.NotAfter.IsZero() && swap.NotAfter.Before(currentTime) {
+					log.Printf("🧹 [MEMPOOL] Removing expired swap order: %s (expired at %s)", 
+						txHash, swap.NotAfter.Format(time.RFC3339))
+					
+					// Remove from storage
+					delete(mp.transactions, txHash)
+					mp.totalSize -= int64(mempoolTx.Size)
+					
+					// Remove from indices
+					mp.removeFromIndices(mempoolTx, &parsedTx)
+					
+					expiredCount++
+					break // Only need to find one expired operation to remove the transaction
+				}
+			}
+		}
+	}
+	
+	if expiredCount > 0 {
+		mp.updateStats()
+		log.Printf("🧹 [MEMPOOL] Cleaned up %d expired swap orders", expiredCount)
+	}
+	
+	return expiredCount
+}
+
+// CleanupAllExpiredTransactions performs both general expiration cleanup and swap-specific cleanup
+func (mp *Mempool) CleanupAllExpiredTransactions() int {
+	generalExpired := mp.CleanupExpiredTransactions()
+	swapExpired := mp.CleanupExpiredSwapOrders()
+	total := generalExpired + swapExpired
+	
+	if total > 0 {
+		log.Printf("🧹 [MEMPOOL] Total cleanup: %d transactions (%d general expired, %d swap expired)", 
+			total, generalExpired, swapExpired)
+	}
+	
+	return total
+}
+
 // Helper methods
 
 func (mp *Mempool) calculateFee(tx *Transaction) uint64 {

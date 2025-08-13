@@ -135,6 +135,7 @@ func main() {
 	// Web dashboard routes
 	r.HandleFunc("/", tracker.handleDashboard).Methods("GET")
 	r.HandleFunc("/dashboard", tracker.handleDashboard).Methods("GET")
+	r.HandleFunc("/tokens", tracker.handleTokensPage).Methods("GET")
 	r.PathPrefix("/static/").Handler(http.StripPrefix("/static/", http.FileServer(http.Dir("./static/"))))
 
 	// Configure server
@@ -163,8 +164,13 @@ func (ts *TrackerService) handleRegister(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// TODO: Verify signature against mining address
-	// For now, accept all registrations
+	// Verify signature against mining address
+	if err := VerifyRegistrationSignature(&req); err != nil {
+		log.Printf("Registration signature verification failed for %s: %v", req.NodeID, err)
+		http.Error(w, "Invalid signature", http.StatusUnauthorized)
+		return
+	}
+	
 	if req.ChainID != testnet0 {
 		log.Printf("client connecting with unknown chain for this tracker: %s", req.ChainID)
 		http.Error(w, "your genesis block does not match any known active chains", http.StatusBadRequest)
@@ -447,24 +453,25 @@ func (ts *TrackerService) handleDashboard(w http.ResponseWriter, r *http.Request
 <head>
     <title>Shadowy Network Tracker</title>
     <style>
-        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        body { font-family: Arial, sans-serif; margin: 20px; background: #1a1a1a; color: #e0e0e0; }
         .container { max-width: 1600px; margin: 0 auto; }
-        .header { background: #333; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .header { background: #2d2d2d; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #444; }
         .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
-        .stat-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .stat-value { font-size: 2em; font-weight: bold; color: #007acc; }
-        .stat-label { color: #666; margin-top: 5px; }
-        .nodes-table { background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .stat-card { background: #2d2d2d; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.3); border: 1px solid #444; }
+        .stat-value { font-size: 2em; font-weight: bold; color: #4a9eff; }
+        .stat-label { color: #ccc; margin-top: 5px; }
+        .nodes-table { background: #2d2d2d; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.3); border: 1px solid #444; }
         table { width: 100%%; border-collapse: collapse; }
-        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #eee; }
-        th { background: #f8f9fa; font-weight: bold; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #444; color: #e0e0e0; }
+        th { background: #383838; font-weight: bold; color: #fff; }
         .status-online { color: #28a745; }
         .status-offline { color: #dc3545; }
         .status-syncing { color: #ffc107; }
         .ip-column { font-family: monospace; font-size: 0.9em; }
-        .ports-column { font-family: monospace; font-size: 0.85em; color: #666; }
+        .ports-column { font-family: monospace; font-size: 0.85em; color: #aaa; }
         .refresh { margin-bottom: 20px; }
-        .refresh button { padding: 10px 20px; background: #007acc; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .refresh button { padding: 10px 20px; background: #4a9eff; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        .refresh button:hover { background: #357abd; }
     </style>
     <script>
         function formatBytes(bytes) {
@@ -599,6 +606,90 @@ func (ts *TrackerService) handleDashboard(w http.ResponseWriter, r *http.Request
             el.textContent = formatBytes(parseInt(el.textContent));
         });
     </script>
+</body>
+</html>`
+
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprint(w, html)
+}
+
+// handleTokensPage serves the tokens dashboard page
+func (ts *TrackerService) handleTokensPage(w http.ResponseWriter, r *http.Request) {
+	// For now, we'll create a mock tokens table that matches the style
+	// In a real implementation, this would fetch token data from network nodes
+	
+	html := `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Shadowy Network Tokens</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #1a1a1a; color: #e0e0e0; }
+        .container { max-width: 1600px; margin: 0 auto; }
+        .header { background: #2d2d2d; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; border: 1px solid #444; }
+        .nav { margin-bottom: 20px; }
+        .nav a { color: #4a9eff; text-decoration: none; margin-right: 20px; padding: 8px 12px; border-radius: 4px; }
+        .nav a:hover { background: #2d2d2d; }
+        .nav a.active { background: #4a9eff; color: white; }
+        .tokens-table { background: #2d2d2d; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.3); border: 1px solid #444; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #444; color: #e0e0e0; }
+        th { background: #383838; font-weight: bold; color: #fff; }
+        .token-id { font-family: monospace; font-size: 0.9em; }
+        .balance { text-align: right; font-weight: bold; }
+        .melt-value { text-align: right; color: #ffc107; }
+        .status-active { color: #28a745; }
+        .status-inactive { color: #dc3545; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🪙 Shadowy Network - Token Statistics</h1>
+            <p>Network-wide token distribution and statistics</p>
+        </div>
+        
+        <div class="nav">
+            <a href="/dashboard">📊 Dashboard</a>
+            <a href="/tokens" class="active">🪙 Tokens</a>
+        </div>
+
+        <div class="tokens-table">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Token ID</th>
+                        <th>Ticker</th>
+                        <th>Name</th>
+                        <th>Creator</th>
+                        <th>Total Supply</th>
+                        <th>Network Balance</th>
+                        <th>Melt Value (SHADOW)</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="token-id">SHADOW</td>
+                        <td><strong>SHADOW</strong></td>
+                        <td>Shadowy Base Currency</td>
+                        <td class="token-id">Genesis</td>
+                        <td class="balance">∞</td>
+                        <td class="balance">-</td>
+                        <td class="melt-value">1.00000000</td>
+                        <td class="status-active">Active</td>
+                    </tr>
+                    <!-- Placeholder for dynamic token data -->
+                    <tr>
+                        <td colspan="8" style="text-align: center; color: #666; padding: 40px;">
+                            🔄 Token data aggregation from network nodes coming soon...<br>
+                            <small>This will show real token statistics once network nodes report their token states</small>
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
 </body>
 </html>`
 

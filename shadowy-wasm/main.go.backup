@@ -1,0 +1,1572 @@
+//go:build wasm
+// +build wasm
+
+package main
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"syscall/js"
+	"time"
+	
+	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
+	"golang.org/x/crypto/sha3"
+)
+
+// ShadowyClient handles communication with Shadowy nodes
+type ShadowyClient struct {
+	BaseURL    string            `json:"base_url"`
+	APIKey     string            `json:"api_key,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"`
+	httpClient *http.Client
+}
+
+// WalletBalance represents the balance information for a wallet
+type WalletBalance struct {
+	Address          string  `json:"address"`
+	ConfirmedBalance uint64  `json:"confirmed_balance_satoshi"`
+	PendingBalance   uint64  `json:"pending_balance_satoshi"`
+	TotalReceived    uint64  `json:"total_received_satoshi"`
+	TotalSent        uint64  `json:"total_sent_satoshi"`
+	TransactionCount int     `json:"transaction_count"`
+	LastActivity     string  `json:"last_activity"`
+	FormattedBalance string  `json:"formatted_balance"`
+}
+
+// NodeInfo represents basic node information
+type NodeInfo struct {
+	Version     string `json:"version"`
+	ChainHeight uint64 `json:"chain_height"`
+	ChainID     string `json:"chain_id"`
+	NodeID      string `json:"node_id,omitempty"`
+	Status      string `json:"status"`
+}
+
+// WalletFile represents a Shadowy wallet file
+type WalletFile struct {
+	Name       string    `json:"name"`
+	Address    string    `json:"address"`
+	Seed       string    `json:"seed"`        // Base64 encoded 64-byte seed for ML-DSA87
+	PrivateKey string    `json:"private_key"` // Base64 encoded ML-DSA87 private key
+	PublicKey  string    `json:"public_key"`  // Base64 encoded ML-DSA87 public key
+	Identifier string    `json:"identifier"`  // Wallet identifier
+	CreatedAt  time.Time `json:"created_at"`
+	Version    int       `json:"version"`
+}
+
+// TransactionInput represents a transaction input
+type TransactionInput struct {
+	TxID         string `json:"txid"`
+	Vout         uint32 `json:"vout"`
+	ScriptSig    string `json:"script_sig"`
+	Sequence     uint32 `json:"sequence"`
+}
+
+// UTXO represents an unspent transaction output
+type UTXO struct {
+	TxID         string `json:"txid"`
+	Vout         uint32 `json:"vout"`
+	Value        uint64 `json:"value"`        // Value in satoshis
+	Address      string `json:"address"`      // Address that owns this UTXO
+	ScriptPubKey string `json:"script_pubkey"`
+	Confirmations int   `json:"confirmations"`
+}
+
+// TransactionOutput represents a transaction output
+type TransactionOutput struct {
+	Value        uint64 `json:"value"`        // Value in satoshis
+	ScriptPubKey string `json:"script_pubkey"`
+	Address      string `json:"address"`      // Destination address
+}
+
+// Transaction represents a Shadowy transaction
+type Transaction struct {
+	Version    uint32              `json:"version"`
+	Inputs     []TransactionInput  `json:"inputs"`
+	Outputs    []TransactionOutput `json:"outputs"`
+	LockTime   uint32              `json:"lock_time"`
+	Timestamp  uint64              `json:"timestamp"`
+}
+
+// SignedTransaction represents a signed transaction ready for broadcast
+type SignedTransaction struct {
+	Transaction Transaction `json:"transaction"`
+	Signatures  []string    `json:"signatures"` // Base64 encoded Ed25519 signatures
+	TxID        string      `json:"txid"`       // Transaction ID
+	RawTx       string      `json:"raw_tx"`     // Hex-encoded raw transaction
+}
+
+// Global instances
+var globalClient *ShadowyClient
+var globalWallet *WalletFile
+
+func main() {
+	// Keep the WASM module alive
+	c := make(chan struct{}, 0)
+	
+	// Register JavaScript functions
+	js.Global().Set("shadowy_create_client", js.FuncOf(createClient))
+	js.Global().Set("shadowy_set_api_key", js.FuncOf(setAPIKey))
+	js.Global().Set("shadowy_get_balance", js.FuncOf(getBalance))
+	js.Global().Set("shadowy_get_node_info", js.FuncOf(getNodeInfo))
+	js.Global().Set("shadowy_test_connection", js.FuncOf(testConnection))
+	
+	// Wallet functions
+	js.Global().Set("shadowy_create_wallet", js.FuncOf(createWallet))
+	js.Global().Set("shadowy_load_wallet", js.FuncOf(loadWallet))
+	js.Global().Set("shadowy_get_wallet_address", js.FuncOf(getWalletAddress))
+	js.Global().Set("shadowy_sign_transaction", js.FuncOf(signTransaction))
+	
+	// Transaction functions
+	js.Global().Set("shadowy_broadcast_transaction", js.FuncOf(broadcastTransaction))
+	
+	fmt.Println("🚀 Shadowy WASM Library initialized")
+	<-c
+}
+
+// createClient creates a new Shadowy client
+func createClient(this js.Value, args []js.Value) interface{} {
+	if len(args) < 1 {
+		return map[string]interface{}{
+			"error": "base_url is required",
+		}
+	}
+	
+	baseURL := args[0].String()
+	
+	globalClient = &ShadowyClient{
+		BaseURL: baseURL,
+		Headers: make(map[string]string),
+		httpClient: &http.Client{
+			Timeout: 30 * time.Second,
+		},
+	}
+	
+	// Set default headers
+	globalClient.Headers["Content-Type"] = "application/json"
+	globalClient.Headers["User-Agent"] = "Shadowy-WASM/1.0"
+	
+	return map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Client created for %s", baseURL),
+	}
+}
+
+// setAPIKey sets the API key for remote node authentication
+func setAPIKey(this js.Value, args []js.Value) interface{} {
+	if globalClient == nil {
+		return map[string]interface{}{
+			"error": "Client not initialized. Call createClient first.",
+		}
+	}
+	
+	if len(args) < 1 {
+		return map[string]interface{}{
+			"error": "API key is required",
+		}
+	}
+	
+	apiKey := args[0].String()
+	globalClient.APIKey = apiKey
+	globalClient.Headers["Authorization"] = fmt.Sprintf("Bearer %s", apiKey)
+	
+	return map[string]interface{}{
+		"success": true,
+		"message": "API key set successfully",
+	}
+}
+
+// testConnection tests if the node is reachable
+func testConnection(this js.Value, args []js.Value) interface{} {
+	if globalClient == nil {
+		return map[string]interface{}{
+			"error": "Client not initialized",
+		}
+	}
+	
+	// Create a promise for async operation
+	handler := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		resolve := args[0]
+		reject := args[1]
+		
+		go func() {
+			nodeInfo, err := globalClient.fetchNodeInfo()
+			if err != nil {
+				reject.Invoke(map[string]interface{}{
+					"error": err.Error(),
+				})
+				return
+			}
+			
+			resolve.Invoke(map[string]interface{}{
+				"success":   true,
+				"node_info": nodeInfo,
+			})
+		}()
+		
+		return nil
+	})
+	
+	promiseConstructor := js.Global().Get("Promise")
+	return promiseConstructor.New(handler)
+}
+
+// jsArrayToGoArray converts a JavaScript array to a Go interface{} array
+func jsArrayToGoArray(jsArray js.Value) []interface{} {
+	if jsArray.IsUndefined() || jsArray.IsNull() {
+		return []interface{}{}
+	}
+	
+	length := jsArray.Length()
+	result := make([]interface{}, length)
+	
+	for i := 0; i < length; i++ {
+		item := jsArray.Index(i)
+		if item.Type() == js.TypeObject {
+			// Convert JS object to Go map
+			result[i] = jsObjectToGoMap(item)
+		} else {
+			// Convert primitive value
+			switch item.Type() {
+			case js.TypeString:
+				result[i] = item.String()
+			case js.TypeNumber:
+				result[i] = item.Float()
+			case js.TypeBoolean:
+				result[i] = item.Bool()
+			default:
+				result[i] = item.String() // fallback
+			}
+		}
+	}
+	
+	return result
+}
+
+// jsObjectToGoMap converts a JavaScript object to a Go map
+func jsObjectToGoMap(jsObj js.Value) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	// Get all property names (this is a simplified version)
+	// For transaction inputs/outputs, we know the expected fields
+	if !jsObj.Get("txid").IsUndefined() {
+		// This is a transaction input
+		result["txid"] = jsObj.Get("txid").String()
+		result["vout"] = uint32(jsObj.Get("vout").Float())
+		result["script_sig"] = jsObj.Get("script_sig").String()
+		result["sequence"] = uint32(jsObj.Get("sequence").Float())
+	} else if !jsObj.Get("value").IsUndefined() {
+		// This is a transaction output
+		result["value"] = uint64(jsObj.Get("value").Float())
+		result["script_pubkey"] = jsObj.Get("script_pubkey").String()
+		result["address"] = jsObj.Get("address").String()
+	}
+	
+	return result
+}
+
+// getNodeInfo gets basic node information
+func getNodeInfo(this js.Value, args []js.Value) interface{} {
+	if globalClient == nil {
+		return map[string]interface{}{
+			"error": "Client not initialized",
+		}
+	}
+	
+	// Create a promise for async operation
+	handler := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		resolve := args[0]
+		reject := args[1]
+		
+		go func() {
+			nodeInfo, err := globalClient.fetchNodeInfo()
+			if err != nil {
+				reject.Invoke(map[string]interface{}{
+					"error": err.Error(),
+				})
+				return
+			}
+			
+			resolve.Invoke(nodeInfo)
+		}()
+		
+		return nil
+	})
+	
+	promiseConstructor := js.Global().Get("Promise")
+	return promiseConstructor.New(handler)
+}
+
+// jsArrayToGoArray converts a JavaScript array to a Go interface{} array
+func jsArrayToGoArray(jsArray js.Value) []interface{} {
+	if jsArray.IsUndefined() || jsArray.IsNull() {
+		return []interface{}{}
+	}
+	
+	length := jsArray.Length()
+	result := make([]interface{}, length)
+	
+	for i := 0; i < length; i++ {
+		item := jsArray.Index(i)
+		if item.Type() == js.TypeObject {
+			// Convert JS object to Go map
+			result[i] = jsObjectToGoMap(item)
+		} else {
+			// Convert primitive value
+			switch item.Type() {
+			case js.TypeString:
+				result[i] = item.String()
+			case js.TypeNumber:
+				result[i] = item.Float()
+			case js.TypeBoolean:
+				result[i] = item.Bool()
+			default:
+				result[i] = item.String() // fallback
+			}
+		}
+	}
+	
+	return result
+}
+
+// jsObjectToGoMap converts a JavaScript object to a Go map
+func jsObjectToGoMap(jsObj js.Value) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	// Get all property names (this is a simplified version)
+	// For transaction inputs/outputs, we know the expected fields
+	if !jsObj.Get("txid").IsUndefined() {
+		// This is a transaction input
+		result["txid"] = jsObj.Get("txid").String()
+		result["vout"] = uint32(jsObj.Get("vout").Float())
+		result["script_sig"] = jsObj.Get("script_sig").String()
+		result["sequence"] = uint32(jsObj.Get("sequence").Float())
+	} else if !jsObj.Get("value").IsUndefined() {
+		// This is a transaction output
+		result["value"] = uint64(jsObj.Get("value").Float())
+		result["script_pubkey"] = jsObj.Get("script_pubkey").String()
+		result["address"] = jsObj.Get("address").String()
+	}
+	
+	return result
+}
+
+// getBalance gets the balance for a given address
+func getBalance(this js.Value, args []js.Value) interface{} {
+	if globalClient == nil {
+		return map[string]interface{}{
+			"error": "Client not initialized",
+		}
+	}
+	
+	if len(args) < 1 {
+		return map[string]interface{}{
+			"error": "Address is required",
+		}
+	}
+	
+	address := args[0].String()
+	
+	// Validate address format (basic check)
+	if !isValidAddressFormat(address) {
+		return map[string]interface{}{
+			"error": "Invalid address format",
+		}
+	}
+	
+	// Create a promise for async operation
+	handler := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		resolve := args[0]
+		reject := args[1]
+		
+		go func() {
+			balance, err := globalClient.fetchBalance(address)
+			if err != nil {
+				reject.Invoke(map[string]interface{}{
+					"error": err.Error(),
+				})
+				return
+			}
+			
+			resolve.Invoke(balance)
+		}()
+		
+		return nil
+	})
+	
+	promiseConstructor := js.Global().Get("Promise")
+	return promiseConstructor.New(handler)
+}
+
+// jsArrayToGoArray converts a JavaScript array to a Go interface{} array
+func jsArrayToGoArray(jsArray js.Value) []interface{} {
+	if jsArray.IsUndefined() || jsArray.IsNull() {
+		return []interface{}{}
+	}
+	
+	length := jsArray.Length()
+	result := make([]interface{}, length)
+	
+	for i := 0; i < length; i++ {
+		item := jsArray.Index(i)
+		if item.Type() == js.TypeObject {
+			// Convert JS object to Go map
+			result[i] = jsObjectToGoMap(item)
+		} else {
+			// Convert primitive value
+			switch item.Type() {
+			case js.TypeString:
+				result[i] = item.String()
+			case js.TypeNumber:
+				result[i] = item.Float()
+			case js.TypeBoolean:
+				result[i] = item.Bool()
+			default:
+				result[i] = item.String() // fallback
+			}
+		}
+	}
+	
+	return result
+}
+
+// jsObjectToGoMap converts a JavaScript object to a Go map
+func jsObjectToGoMap(jsObj js.Value) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	// Get all property names (this is a simplified version)
+	// For transaction inputs/outputs, we know the expected fields
+	if !jsObj.Get("txid").IsUndefined() {
+		// This is a transaction input
+		result["txid"] = jsObj.Get("txid").String()
+		result["vout"] = uint32(jsObj.Get("vout").Float())
+		result["script_sig"] = jsObj.Get("script_sig").String()
+		result["sequence"] = uint32(jsObj.Get("sequence").Float())
+	} else if !jsObj.Get("value").IsUndefined() {
+		// This is a transaction output
+		result["value"] = uint64(jsObj.Get("value").Float())
+		result["script_pubkey"] = jsObj.Get("script_pubkey").String()
+		result["address"] = jsObj.Get("address").String()
+	}
+	
+	return result
+}
+
+// fetchNodeInfo makes HTTP request to get node information using JavaScript bridge
+func (c *ShadowyClient) fetchNodeInfo() (map[string]interface{}, error) {
+	// Try the web wallet blockchain endpoint first (what's actually available)  
+	url := fmt.Sprintf("%s/api/v1/blockchain", c.BaseURL)
+	
+	// Use JavaScript HTTP bridge since WASM can't do native HTTP
+	result, err := c.httpRequest("GET", url, nil)
+	if err != nil {
+		// If blockchain API endpoint fails, try wallet balance endpoint as connection test
+		testURL := fmt.Sprintf("%s/wallet/balance?address=S427a724d41e3a5a03d1f83553134239813272bc2c4b2d50737", c.BaseURL)
+		testResult, testErr := c.httpRequest("GET", testURL, nil)
+		if testErr != nil {
+			return nil, fmt.Errorf("failed to connect to node: %w", err)
+		}
+		
+		if testResult["status_code"].(float64) == 200 || testResult["status_code"].(float64) == 401 {
+			// Node is responding, even if auth is required
+			return map[string]interface{}{
+				"status": "online",
+				"message": "Node is responding (wallet endpoint available)",
+			}, nil
+		}
+		
+		return nil, fmt.Errorf("failed to connect to node: %w", err)
+	}
+	
+	statusCode := result["status_code"].(float64)
+	if statusCode != 200 {
+		return nil, fmt.Errorf("node returned status %.0f", statusCode)
+	}
+	
+	var nodeInfo map[string]interface{}
+	responseBody := result["body"].(string)
+	if err := json.Unmarshal([]byte(responseBody), &nodeInfo); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+	
+	return nodeInfo, nil
+}
+
+// fetchBalance makes HTTP request to get wallet balance using JavaScript bridge
+func (c *ShadowyClient) fetchBalance(address string) (map[string]interface{}, error) {
+	// Use the correct balance endpoint that's actually available
+	url := fmt.Sprintf("%s/wallet/balance?address=%s", c.BaseURL, address)
+	
+	// Use JavaScript HTTP bridge since WASM can't do native HTTP
+	result, err := c.httpRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to node: %w", err)
+	}
+	
+	statusCode := result["status_code"].(float64)
+	
+	if statusCode == 401 {
+		return nil, fmt.Errorf("authentication required - node may require login")
+	}
+	
+	if statusCode != 200 {
+		return nil, fmt.Errorf("node returned status %.0f", statusCode)
+	}
+	
+	var balance map[string]interface{}
+	responseBody := result["body"].(string)
+	if err := json.Unmarshal([]byte(responseBody), &balance); err != nil {
+		return nil, fmt.Errorf("failed to decode balance response: %w", err)
+	}
+	
+	// Add formatted balance for display - check both possible field names
+	var confirmedBalance float64
+	if val, ok := balance["confirmed_balance_satoshi"].(float64); ok {
+		confirmedBalance = val
+	} else if val, ok := balance["confirmed_shadow"].(float64); ok {
+		confirmedBalance = val * 100000000 // Convert from SHADOW to satoshi
+	}
+	
+	if confirmedBalance > 0 {
+		balance["formatted_balance"] = fmt.Sprintf("%.8f SHADOW", confirmedBalance/100000000.0)
+	} else {
+		balance["formatted_balance"] = "0.00000000 SHADOW"
+	}
+	
+	return balance, nil
+}
+
+// fetchUTXOs gets available UTXOs for an address
+func (c *ShadowyClient) fetchUTXOs(address string) ([]UTXO, error) {
+	// For now, create mock UTXOs since the node doesn't have a UTXO endpoint yet
+	// In a real implementation, this would query something like /api/v1/address/{address}/utxos
+	
+	// Mock some realistic UTXOs for testing
+	mockUTXOs := []UTXO{
+		{
+			TxID:         "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
+			Vout:         0,
+			Value:        500000000, // 5.0 SHADOW
+			Address:      address,
+			ScriptPubKey: fmt.Sprintf("PAY_TO_ADDRESS SHADOW %s", address),
+			Confirmations: 10,
+		},
+		{
+			TxID:         "b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef1234567",
+			Vout:         1,
+			Value:        250000000, // 2.5 SHADOW 
+			Address:      address,
+			ScriptPubKey: fmt.Sprintf("PAY_TO_ADDRESS SHADOW %s", address),
+			Confirmations: 5,
+		},
+		{
+			TxID:         "c3d4e5f6789012345678901234567890abcdef1234567890abcdef12345678",
+			Vout:         0,
+			Value:        100000000, // 1.0 SHADOW
+			Address:      address,
+			ScriptPubKey: fmt.Sprintf("PAY_TO_ADDRESS SHADOW %s", address),
+			Confirmations: 3,
+		},
+	}
+	
+	fmt.Printf("[DEBUG] Mock UTXOs for %s: %d available (total: %.8f SHADOW)\n", 
+		address[:20]+"...", 
+		len(mockUTXOs),
+		float64(500000000+250000000+100000000)/100000000.0)
+	
+	return mockUTXOs, nil
+}
+
+// httpRequest makes HTTP requests via JavaScript bridge
+func (c *ShadowyClient) httpRequest(method, url string, body []byte) (map[string]interface{}, error) {
+	// Prepare request data for JavaScript
+	requestData := map[string]interface{}{
+		"method":  method,
+		"url":     url,
+		"headers": c.Headers,
+	}
+	
+	if body != nil {
+		requestData["body"] = string(body)
+	}
+	
+	// Call JavaScript HTTP bridge function
+	httpBridge := js.Global().Get("shadowy_http_bridge")
+	if httpBridge.IsUndefined() {
+		return nil, fmt.Errorf("JavaScript HTTP bridge not available - run in Node.js or implement bridge in browser")
+	}
+	
+	// Convert Go data to JavaScript-compatible format
+	jsRequest := js.ValueOf(map[string]interface{}{
+		"method": requestData["method"].(string),
+		"url":    requestData["url"].(string),
+	})
+	
+	// Set headers as a separate object
+	if len(c.Headers) > 0 {
+		headersObj := js.ValueOf(map[string]interface{}{})
+		for key, value := range c.Headers {
+			headersObj.Set(key, js.ValueOf(value))
+		}
+		jsRequest.Set("headers", headersObj)
+	}
+	
+	// Call the bridge and wait for promise resolution
+	resultChan := make(chan map[string]interface{}, 1)
+	errorChan := make(chan error, 1)
+	
+	// Call the bridge function and handle the promise
+	promise := httpBridge.Invoke(jsRequest)
+	
+	// Handle promise resolution
+	thenCallback := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		if len(args) > 0 {
+			result := args[0]
+			response := make(map[string]interface{})
+			
+			// Get the result object
+			resultObj := result.Get("result")
+			if !resultObj.IsUndefined() {
+				statusCode := resultObj.Get("status_code")
+				bodyStr := resultObj.Get("body")
+				
+				if !statusCode.IsUndefined() {
+					response["status_code"] = statusCode.Float()
+				}
+				if !bodyStr.IsUndefined() {
+					response["body"] = bodyStr.String()
+				}
+			}
+			
+			resultChan <- response
+		} else {
+			errorChan <- fmt.Errorf("no result from HTTP bridge")
+		}
+		return nil
+	})
+	defer thenCallback.Release()
+	
+	// Handle promise rejection
+	catchCallback := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		if len(args) > 0 {
+			errorMsg := args[0].Get("error").String()
+			errorChan <- fmt.Errorf("HTTP request failed: %s", errorMsg)
+		} else {
+			errorChan <- fmt.Errorf("HTTP request failed with unknown error")
+		}
+		return nil
+	})
+	defer catchCallback.Release()
+	
+	// Attach callbacks to promise
+	promise.Call("then", thenCallback).Call("catch", catchCallback)
+	
+	// Wait for result or error
+	select {
+	case result := <-resultChan:
+		return result, nil
+	case err := <-errorChan:
+		return nil, err
+	}
+}
+
+// httpRequestPost makes HTTP POST requests via JavaScript bridge
+func (c *ShadowyClient) httpRequestPost(url string, body []byte) (map[string]interface{}, error) {
+	return c.httpRequest("POST", url, body)
+}
+
+// isValidAddressFormat performs basic Shadowy address validation
+func isValidAddressFormat(address string) bool {
+	// Basic validation - Shadowy addresses start with 'S' and are specific length
+	if len(address) < 40 || len(address) > 60 {
+		return false
+	}
+	
+	if address[0] != 'S' && address[0] != 'L' {
+		return false
+	}
+	
+	// Could add more sophisticated validation (checksum, etc.)
+	return true
+}
+
+// createWallet creates a new wallet with secure key generation
+func createWallet(this js.Value, args []js.Value) interface{} {
+	if len(args) < 1 {
+		return map[string]interface{}{
+			"error": "wallet name is required",
+		}
+	}
+	
+	walletName := args[0].String()
+	
+	// Create promise for async operation
+	handler := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		resolve := args[0]
+		reject := args[1]
+		
+		go func() {
+			wallet, err := generateNewWallet(walletName)
+			if err != nil {
+				reject.Invoke(map[string]interface{}{
+					"error": err.Error(),
+				})
+				return
+			}
+			
+			// Save wallet to global state
+			globalWallet = wallet
+			
+			resolve.Invoke(map[string]interface{}{
+				"success": true,
+				"name":    wallet.Name,
+				"address": wallet.Address,
+				"message": fmt.Sprintf("Wallet '%s' created successfully", walletName),
+			})
+		}()
+		
+		return nil
+	})
+	
+	promiseConstructor := js.Global().Get("Promise")
+	return promiseConstructor.New(handler)
+}
+
+// jsArrayToGoArray converts a JavaScript array to a Go interface{} array
+func jsArrayToGoArray(jsArray js.Value) []interface{} {
+	if jsArray.IsUndefined() || jsArray.IsNull() {
+		return []interface{}{}
+	}
+	
+	length := jsArray.Length()
+	result := make([]interface{}, length)
+	
+	for i := 0; i < length; i++ {
+		item := jsArray.Index(i)
+		if item.Type() == js.TypeObject {
+			// Convert JS object to Go map
+			result[i] = jsObjectToGoMap(item)
+		} else {
+			// Convert primitive value
+			switch item.Type() {
+			case js.TypeString:
+				result[i] = item.String()
+			case js.TypeNumber:
+				result[i] = item.Float()
+			case js.TypeBoolean:
+				result[i] = item.Bool()
+			default:
+				result[i] = item.String() // fallback
+			}
+		}
+	}
+	
+	return result
+}
+
+// jsObjectToGoMap converts a JavaScript object to a Go map
+func jsObjectToGoMap(jsObj js.Value) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	// Get all property names (this is a simplified version)
+	// For transaction inputs/outputs, we know the expected fields
+	if !jsObj.Get("txid").IsUndefined() {
+		// This is a transaction input
+		result["txid"] = jsObj.Get("txid").String()
+		result["vout"] = uint32(jsObj.Get("vout").Float())
+		result["script_sig"] = jsObj.Get("script_sig").String()
+		result["sequence"] = uint32(jsObj.Get("sequence").Float())
+	} else if !jsObj.Get("value").IsUndefined() {
+		// This is a transaction output
+		result["value"] = uint64(jsObj.Get("value").Float())
+		result["script_pubkey"] = jsObj.Get("script_pubkey").String()
+		result["address"] = jsObj.Get("address").String()
+	}
+	
+	return result
+}
+
+// loadWallet loads an existing wallet from file
+func loadWallet(this js.Value, args []js.Value) interface{} {
+	if len(args) < 1 {
+		return map[string]interface{}{
+			"error": "wallet name is required",
+		}
+	}
+	
+	walletName := args[0].String()
+	
+	// Create promise for async operation
+	handler := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		resolve := args[0]
+		reject := args[1]
+		
+		go func() {
+			wallet, err := loadWalletFile(walletName)
+			if err != nil {
+				reject.Invoke(map[string]interface{}{
+					"error": err.Error(),
+				})
+				return
+			}
+			
+			// Save wallet to global state
+			globalWallet = wallet
+			
+			resolve.Invoke(map[string]interface{}{
+				"success": true,
+				"name":    wallet.Name,
+				"address": wallet.Address,
+				"message": fmt.Sprintf("Wallet '%s' loaded successfully", walletName),
+			})
+		}()
+		
+		return nil
+	})
+	
+	promiseConstructor := js.Global().Get("Promise")
+	return promiseConstructor.New(handler)
+}
+
+// jsArrayToGoArray converts a JavaScript array to a Go interface{} array
+func jsArrayToGoArray(jsArray js.Value) []interface{} {
+	if jsArray.IsUndefined() || jsArray.IsNull() {
+		return []interface{}{}
+	}
+	
+	length := jsArray.Length()
+	result := make([]interface{}, length)
+	
+	for i := 0; i < length; i++ {
+		item := jsArray.Index(i)
+		if item.Type() == js.TypeObject {
+			// Convert JS object to Go map
+			result[i] = jsObjectToGoMap(item)
+		} else {
+			// Convert primitive value
+			switch item.Type() {
+			case js.TypeString:
+				result[i] = item.String()
+			case js.TypeNumber:
+				result[i] = item.Float()
+			case js.TypeBoolean:
+				result[i] = item.Bool()
+			default:
+				result[i] = item.String() // fallback
+			}
+		}
+	}
+	
+	return result
+}
+
+// jsObjectToGoMap converts a JavaScript object to a Go map
+func jsObjectToGoMap(jsObj js.Value) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	// Get all property names (this is a simplified version)
+	// For transaction inputs/outputs, we know the expected fields
+	if !jsObj.Get("txid").IsUndefined() {
+		// This is a transaction input
+		result["txid"] = jsObj.Get("txid").String()
+		result["vout"] = uint32(jsObj.Get("vout").Float())
+		result["script_sig"] = jsObj.Get("script_sig").String()
+		result["sequence"] = uint32(jsObj.Get("sequence").Float())
+	} else if !jsObj.Get("value").IsUndefined() {
+		// This is a transaction output
+		result["value"] = uint64(jsObj.Get("value").Float())
+		result["script_pubkey"] = jsObj.Get("script_pubkey").String()
+		result["address"] = jsObj.Get("address").String()
+	}
+	
+	return result
+}
+
+// getWalletAddress returns the current wallet address
+func getWalletAddress(this js.Value, args []js.Value) interface{} {
+	if globalWallet == nil {
+		return map[string]interface{}{
+			"error": "No wallet loaded. Create or load a wallet first.",
+		}
+	}
+	
+	return map[string]interface{}{
+		"success": true,
+		"address": globalWallet.Address,
+		"name":    globalWallet.Name,
+	}
+}
+
+// signTransaction signs a transaction with the loaded wallet
+func signTransaction(this js.Value, args []js.Value) interface{} {
+	if globalWallet == nil {
+		return map[string]interface{}{
+			"error": "No wallet loaded for signing",
+		}
+	}
+	
+	if len(args) < 1 {
+		return map[string]interface{}{
+			"error": "transaction data is required",
+		}
+	}
+	
+	// Get transaction data from the original args
+	txDataJS := args[0]
+	
+	// Create promise for async operation
+	handler := js.FuncOf(func(this js.Value, promiseArgs []js.Value) interface{} {
+		resolve := promiseArgs[0]
+		reject := promiseArgs[1]
+		
+		go func() {
+			// Parse transaction data from JavaScript
+			if txDataJS.IsUndefined() {
+				reject.Invoke(map[string]interface{}{
+					"error": "Invalid transaction data",
+				})
+				return
+			}
+			
+			// Convert JavaScript transaction data to Go struct
+			transaction, err := parseTransactionFromJS(txDataJS)
+			if err != nil {
+				reject.Invoke(map[string]interface{}{
+					"error": fmt.Sprintf("Failed to parse transaction: %s", err.Error()),
+				})
+				return
+			}
+			
+			// Sign the transaction
+			signedTx, err := signTransactionWithWallet(transaction, globalWallet)
+			if err != nil {
+				reject.Invoke(map[string]interface{}{
+					"error": fmt.Sprintf("Failed to sign transaction: %s", err.Error()),
+				})
+				return
+			}
+			
+			// Create JavaScript-compatible response manually
+			response := js.ValueOf(map[string]interface{}{
+				"success": true,
+				"txid":    signedTx.TxID,
+				"raw_tx":  signedTx.RawTx,
+				"message": "Transaction signed successfully",
+			})
+			
+			// Add signatures as an array
+			signatures := js.ValueOf(make([]interface{}, len(signedTx.Signatures)))
+			for i, sig := range signedTx.Signatures {
+				signatures.SetIndex(i, js.ValueOf(sig))
+			}
+			response.Set("signatures", signatures)
+			
+			resolve.Invoke(response)
+		}()
+		
+		return nil
+	})
+	
+	promiseConstructor := js.Global().Get("Promise")
+	return promiseConstructor.New(handler)
+}
+
+// jsArrayToGoArray converts a JavaScript array to a Go interface{} array
+func jsArrayToGoArray(jsArray js.Value) []interface{} {
+	if jsArray.IsUndefined() || jsArray.IsNull() {
+		return []interface{}{}
+	}
+	
+	length := jsArray.Length()
+	result := make([]interface{}, length)
+	
+	for i := 0; i < length; i++ {
+		item := jsArray.Index(i)
+		if item.Type() == js.TypeObject {
+			// Convert JS object to Go map
+			result[i] = jsObjectToGoMap(item)
+		} else {
+			// Convert primitive value
+			switch item.Type() {
+			case js.TypeString:
+				result[i] = item.String()
+			case js.TypeNumber:
+				result[i] = item.Float()
+			case js.TypeBoolean:
+				result[i] = item.Bool()
+			default:
+				result[i] = item.String() // fallback
+			}
+		}
+	}
+	
+	return result
+}
+
+// jsObjectToGoMap converts a JavaScript object to a Go map
+func jsObjectToGoMap(jsObj js.Value) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	// Get all property names (this is a simplified version)
+	// For transaction inputs/outputs, we know the expected fields
+	if !jsObj.Get("txid").IsUndefined() {
+		// This is a transaction input
+		result["txid"] = jsObj.Get("txid").String()
+		result["vout"] = uint32(jsObj.Get("vout").Float())
+		result["script_sig"] = jsObj.Get("script_sig").String()
+		result["sequence"] = uint32(jsObj.Get("sequence").Float())
+	} else if !jsObj.Get("value").IsUndefined() {
+		// This is a transaction output
+		result["value"] = uint64(jsObj.Get("value").Float())
+		result["script_pubkey"] = jsObj.Get("script_pubkey").String()
+		result["address"] = jsObj.Get("address").String()
+	}
+	
+	return result
+}
+
+// generateNewWallet creates a new wallet with secure Dilithium Mode3 key generation
+func generateNewWallet(name string) (*WalletFile, error) {
+	// Get crypto bridge for secure random generation
+	cryptoBridge := js.Global().Get("shadowy_crypto_bridge")
+	if cryptoBridge.IsUndefined() {
+		return nil, fmt.Errorf("crypto bridge not available")
+	}
+	
+	// Generate ML-DSA87 key pair (equivalent to Dilithium Mode3)
+	publicKey, privateKey, err := mldsa87.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate ML-DSA87 key pair: %w", err)
+	}
+	
+	// Generate 64-byte seed for storage (can be used to recreate keys if needed)
+	seed := make([]byte, 64)
+	_, err = rand.Read(seed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate seed: %w", err)
+	}
+	
+	// Convert public key to bytes for address generation
+	publicKeyBytes := publicKey.Bytes()
+	
+	// Create Shadowy address from public key
+	address, err := generateShadowyAddress(publicKeyBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate address: %w", err)
+	}
+	
+	// Convert keys to bytes for storage
+	privateKeyBytes := privateKey.Bytes()
+	
+	// Create wallet structure
+	wallet := &WalletFile{
+		Name:       name,
+		Address:    address,
+		Seed:       base64.StdEncoding.EncodeToString(seed),
+		PrivateKey: base64.StdEncoding.EncodeToString(privateKeyBytes),
+		PublicKey:  base64.StdEncoding.EncodeToString(publicKeyBytes),
+		Identifier: generateWalletIdentifier(address),
+		CreatedAt:  time.Now(),
+		Version:    3, // Version 3 uses Dilithium Mode3 (ML-DSA87 equivalent)
+	}
+	
+	// Save to file via JavaScript bridge
+	walletData, err := json.MarshalIndent(wallet, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize wallet: %w", err)
+	}
+	
+	filename := fmt.Sprintf("shadowy-wallet-%s.json", name)
+	writeFunc := cryptoBridge.Get("writeWalletFile")
+	success := writeFunc.Invoke(filename, string(walletData)).Bool()
+	
+	if !success {
+		return nil, fmt.Errorf("failed to save wallet file")
+	}
+	
+	return wallet, nil
+}
+
+// loadWalletFile loads a wallet from file via JavaScript bridge
+func loadWalletFile(name string) (*WalletFile, error) {
+	cryptoBridge := js.Global().Get("shadowy_crypto_bridge")
+	if cryptoBridge.IsUndefined() {
+		return nil, fmt.Errorf("crypto bridge not available")
+	}
+	
+	filename := fmt.Sprintf("shadowy-wallet-%s.json", name)
+	readFunc := cryptoBridge.Get("readWalletFile")
+	result := readFunc.Invoke(filename)
+	
+	if result.IsNull() {
+		return nil, fmt.Errorf("wallet file not found: %s", filename)
+	}
+	
+	walletData := result.String()
+	
+	var wallet WalletFile
+	if err := json.Unmarshal([]byte(walletData), &wallet); err != nil {
+		return nil, fmt.Errorf("failed to parse wallet file: %w", err)
+	}
+	
+	return &wallet, nil
+}
+
+// generateShadowyAddress creates a Shadowy address from a Dilithium Mode3 public key
+// This is copied exactly from the main Golang project's DeriveAddress function
+func generateShadowyAddress(publicKey []byte) (string, error) {
+	// Step 1: Hash the public key with SHAKE256 for better distribution
+	shake := sha3.NewShake256()
+	shake.Write(publicKey)
+	
+	// Extract 20 bytes like Ethereum
+	hash := make([]byte, 20)
+	shake.Read(hash)
+	
+	// Step 2: Create versioned payload
+	const AddressVersion = 0x42 // 'S' for Shadowy
+	payload := make([]byte, 21)
+	payload[0] = AddressVersion
+	copy(payload[1:], hash)
+	
+	// Step 3: Calculate checksum (double SHA256 like Bitcoin)
+	checksum := calculateChecksum(payload)
+	
+	// Step 4: Combine version + hash + checksum
+	const AddressLen = 1 + 20 + 4 // version + hash + checksum = 25 bytes
+	fullAddress := make([]byte, AddressLen)
+	copy(fullAddress[:21], payload)
+	copy(fullAddress[21:], checksum)
+	
+	// Step 5: Encode as hex with 'S' prefix (exactly like main project)
+	return "S" + hex.EncodeToString(fullAddress), nil
+}
+
+// calculateChecksum computes 4-byte checksum using double SHA256 (copied from main project)
+func calculateChecksum(data []byte) []byte {
+	// First SHA256
+	hash1 := sha3.NewLegacyKeccak256()
+	hash1.Write(data)
+	firstHash := hash1.Sum(nil)
+	
+	// Second SHA256
+	hash2 := sha3.NewLegacyKeccak256()
+	hash2.Write(firstHash)
+	secondHash := hash2.Sum(nil)
+	
+	// Return first 4 bytes as checksum
+	return secondHash[:4]
+}
+
+// generateWalletIdentifier creates a unique identifier for the wallet
+func generateWalletIdentifier(address string) string {
+	hash := sha256.Sum256([]byte(address + time.Now().String()))
+	return hex.EncodeToString(hash[:8])
+}
+
+// parseTransactionFromJS converts JavaScript transaction object to Go Transaction
+func parseTransactionFromJS(jsValue js.Value) (*Transaction, error) {
+	transaction := &Transaction{
+		Version:   1,
+		Inputs:    []TransactionInput{},
+		Outputs:   []TransactionOutput{},
+		LockTime:  0,
+		Timestamp: uint64(time.Now().Unix()),
+	}
+	
+	// Parse transaction properties from new send command format
+	var destination string
+	var amount uint64
+	var token string
+	var fee uint64
+	
+	// Handle both old format (to_address) and new format (destination)
+	if !jsValue.Get("destination").IsUndefined() {
+		destination = jsValue.Get("destination").String()
+	} else if !jsValue.Get("to_address").IsUndefined() {
+		destination = jsValue.Get("to_address").String()
+	}
+	
+	if !jsValue.Get("amount").IsUndefined() {
+		amount = uint64(jsValue.Get("amount").Float())
+	}
+	
+	if !jsValue.Get("token").IsUndefined() {
+		token = jsValue.Get("token").String()
+	} else {
+		token = "SHADOW"
+	}
+	
+	if !jsValue.Get("fee").IsUndefined() {
+		fee = uint64(jsValue.Get("fee").Float())
+	}
+	
+	// Create main output to destination
+	if destination != "" && amount > 0 {
+		output := TransactionOutput{
+			Value:        amount,
+			Address:      destination,
+			ScriptPubKey: fmt.Sprintf("PAY_TO_ADDRESS %s %s", token, destination),
+		}
+		transaction.Outputs = append(transaction.Outputs, output)
+	}
+	
+	// Create fee output if fee > 0
+	if fee > 0 {
+		feeOutput := TransactionOutput{
+			Value:        fee,
+			Address:      "NETWORK_FEE",
+			ScriptPubKey: "NETWORK_FEE SHADOW",
+		}
+		transaction.Outputs = append(transaction.Outputs, feeOutput)
+	}
+	
+	// Create realistic transaction with UTXO inputs and change output  
+	if err := buildTransactionInputs(transaction, globalWallet, amount, fee); err != nil {
+		return nil, fmt.Errorf("failed to build transaction inputs: %w", err)
+	}
+	
+	return transaction, nil
+}
+
+// buildTransactionInputs performs UTXO selection and builds transaction inputs
+func buildTransactionInputs(transaction *Transaction, wallet *WalletFile, targetAmount, fee uint64) error {
+	if globalClient == nil {
+		return fmt.Errorf("client not initialized")
+	}
+	
+	// Get available UTXOs for the wallet address
+	utxos, err := globalClient.fetchUTXOs(wallet.Address)
+	if err != nil {
+		return fmt.Errorf("failed to fetch UTXOs: %w", err)
+	}
+	
+	if len(utxos) == 0 {
+		return fmt.Errorf("no UTXOs available for address %s", wallet.Address)
+	}
+	
+	// Calculate total amount needed (target + fee)
+	totalNeeded := targetAmount + fee
+	
+	// Select UTXOs using greedy algorithm (largest first)
+	selectedUTXOs, totalSelected, err := selectUTXOs(utxos, totalNeeded)
+	if err != nil {
+		return fmt.Errorf("UTXO selection failed: %w", err)
+	}
+	
+	// Build transaction inputs from selected UTXOs
+	transaction.Inputs = make([]TransactionInput, len(selectedUTXOs))
+	for i, utxo := range selectedUTXOs {
+		transaction.Inputs[i] = TransactionInput{
+			TxID:      utxo.TxID,
+			Vout:      utxo.Vout,
+			ScriptSig: "",    // Will be filled during signing
+			Sequence:  0xFFFFFFFF, // Standard sequence number
+		}
+	}
+	
+	// Calculate change amount
+	changeAmount := totalSelected - totalNeeded
+	
+	// Add change output if we have excess funds (and it's worth the dust threshold)
+	const dustThreshold = 1000 // 0.00001 SHADOW minimum change
+	if changeAmount > dustThreshold {
+		changeOutput := TransactionOutput{
+			Value:        changeAmount,
+			Address:      wallet.Address, // Send change back to sender
+			ScriptPubKey: fmt.Sprintf("PAY_TO_ADDRESS SHADOW %s", wallet.Address),
+		}
+		transaction.Outputs = append(transaction.Outputs, changeOutput)
+		
+		fmt.Printf("[DEBUG] Added change output: %.8f SHADOW back to %s\n",
+			float64(changeAmount)/100000000.0, wallet.Address[:20]+"...")
+	}
+	
+	fmt.Printf("[DEBUG] Transaction built with %d inputs, total value: %.8f SHADOW\n",
+		len(selectedUTXOs), float64(totalSelected)/100000000.0)
+	
+	return nil
+}
+
+// selectUTXOs selects UTXOs to cover the target amount using greedy selection
+func selectUTXOs(utxos []UTXO, targetAmount uint64) ([]UTXO, uint64, error) {
+	// Sort UTXOs by value (largest first) for greedy selection
+	sortedUTXOs := make([]UTXO, len(utxos))
+	copy(sortedUTXOs, utxos)
+	
+	// Simple sorting by value (descending)
+	for i := 0; i < len(sortedUTXOs); i++ {
+		for j := i + 1; j < len(sortedUTXOs); j++ {
+			if sortedUTXOs[i].Value < sortedUTXOs[j].Value {
+				sortedUTXOs[i], sortedUTXOs[j] = sortedUTXOs[j], sortedUTXOs[i]
+			}
+		}
+	}
+	
+	var selectedUTXOs []UTXO
+	var totalSelected uint64
+	
+	// Greedy selection: pick UTXOs until we have enough
+	for _, utxo := range sortedUTXOs {
+		selectedUTXOs = append(selectedUTXOs, utxo)
+		totalSelected += utxo.Value
+		
+		fmt.Printf("[DEBUG] Selected UTXO: %s:%d (%.8f SHADOW)\n",
+			utxo.TxID[:8]+"...", utxo.Vout, float64(utxo.Value)/100000000.0)
+		
+		if totalSelected >= targetAmount {
+			break
+		}
+	}
+	
+	// Check if we have enough funds
+	if totalSelected < targetAmount {
+		return nil, 0, fmt.Errorf("insufficient funds: need %.8f SHADOW, available %.8f SHADOW",
+			float64(targetAmount)/100000000.0, float64(totalSelected)/100000000.0)
+	}
+	
+	fmt.Printf("[DEBUG] UTXO selection complete: %d UTXOs selected, total: %.8f SHADOW\n",
+		len(selectedUTXOs), float64(totalSelected)/100000000.0)
+	
+	return selectedUTXOs, totalSelected, nil
+}
+
+// signTransactionWithWallet signs a transaction using the wallet's Dilithium Mode3 private key
+func signTransactionWithWallet(tx *Transaction, wallet *WalletFile) (*SignedTransaction, error) {
+	// Decode the private key from base64
+	privateKeyBytes, err := base64.StdEncoding.DecodeString(wallet.PrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode private key: %w", err)
+	}
+	
+	// Reconstruct ML-DSA87 private key from bytes
+	var privateKey mldsa87.PrivateKey
+	if err := privateKey.UnmarshalBinary(privateKeyBytes); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal ML-DSA87 private key: %w", err)
+	}
+	
+	// Serialize the transaction for signing
+	txBytes, err := serializeTransaction(tx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize transaction: %w", err)
+	}
+	
+	// Sign the transaction data directly with ML-DSA87
+	// ML-DSA87 doesn't require pre-hashing like Ed25519
+	signature := make([]byte, mldsa87.SignatureSize) // 4627 bytes
+	err = mldsa87.SignTo(&privateKey, txBytes, nil, false, signature)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sign transaction: %w", err)
+	}
+	
+	// Debug: Check actual signature and serialization sizes
+	fmt.Printf("[DEBUG] ML-DSA87 signature size: %d bytes (expected: 4627)\n", len(signature))
+	base64Sig := base64.StdEncoding.EncodeToString(signature)
+	fmt.Printf("[DEBUG] Base64 signature size: %d chars\n", len(base64Sig))
+	fmt.Printf("[DEBUG] Transaction bytes size: %d bytes\n", len(txBytes))
+	
+	// Create transaction hash for the ID
+	txHash := sha256.Sum256(txBytes)
+	
+	// Create the signed transaction
+	signedTx := &SignedTransaction{
+		Transaction: *tx,
+		Signatures:  []string{base64Sig},
+		TxID:        hex.EncodeToString(txHash[:]),
+		RawTx:       hex.EncodeToString(txBytes),
+	}
+	
+	// Debug: Check total signed transaction size
+	signedTxBytes, err := json.Marshal(signedTx)
+	if err == nil {
+		fmt.Printf("[DEBUG] Complete signed transaction JSON size: %d bytes\n", len(signedTxBytes))
+	}
+	
+	return signedTx, nil
+}
+
+// serializeTransaction serializes a transaction for signing/hashing
+func serializeTransaction(tx *Transaction) ([]byte, error) {
+	// Simple transaction serialization for Shadowy
+	// In a real implementation, this would follow the exact protocol format
+	
+	txData := map[string]interface{}{
+		"version":   tx.Version,
+		"inputs":    tx.Inputs,
+		"outputs":   tx.Outputs,
+		"lock_time": tx.LockTime,
+		"timestamp": tx.Timestamp,
+	}
+	
+	return json.Marshal(txData)
+}
+
+// broadcastTransaction broadcasts a signed transaction to the Shadowy network
+func broadcastTransaction(this js.Value, args []js.Value) interface{} {
+	if globalClient == nil {
+		return map[string]interface{}{
+			"error": "Client not initialized",
+		}
+	}
+	
+	if len(args) < 1 {
+		return map[string]interface{}{
+			"error": "signed transaction is required",
+		}
+	}
+	
+	// Get signed transaction from JavaScript
+	signedTxJS := args[0]
+	
+	// Create promise for async operation
+	handler := js.FuncOf(func(this js.Value, promiseArgs []js.Value) interface{} {
+		resolve := promiseArgs[0]
+		reject := promiseArgs[1]
+		
+		go func() {
+			// Parse the signed transaction from JS
+			if signedTxJS.IsUndefined() {
+				reject.Invoke(map[string]interface{}{
+					"error": "Invalid signed transaction data",
+				})
+				return
+			}
+			
+			// Build the transaction payload exactly matching SignedTransaction format
+			// Parse the transaction object from signedTxJS
+			transactionJS := signedTxJS.Get("transaction")
+			
+			txPayload := map[string]interface{}{
+				"txid":       signedTxJS.Get("txid").String(),
+				"raw_tx":     signedTxJS.Get("raw_tx").String(),
+				"signatures": []string{signedTxJS.Get("signatures").Index(0).String()},
+				"transaction": map[string]interface{}{
+					"version":   transactionJS.Get("version").Int(),
+					"inputs":    jsArrayToGoArray(transactionJS.Get("inputs")),
+					"outputs":   jsArrayToGoArray(transactionJS.Get("outputs")),
+					"lock_time": transactionJS.Get("lock_time").Int(),
+					"timestamp": transactionJS.Get("timestamp").Int(),
+				},
+			}
+			
+			// Convert to JSON
+			payloadBytes, err := json.Marshal(txPayload)
+			if err != nil {
+				reject.Invoke(map[string]interface{}{
+					"error": fmt.Sprintf("Failed to marshal transaction: %s", err.Error()),
+				})
+				return
+			}
+			
+			// Submit to mempool endpoint
+			url := fmt.Sprintf("%s/api/v1/mempool/transactions", globalClient.BaseURL)
+			result, err := globalClient.httpRequestPost(url, payloadBytes)
+			if err != nil {
+				reject.Invoke(map[string]interface{}{
+					"error": fmt.Sprintf("Failed to broadcast transaction: %s", err.Error()),
+				})
+				return
+			}
+			
+			statusCode := result["status_code"].(float64)
+			if statusCode != 202 { // HTTP 202 Accepted
+				var errorMsg string
+				if statusCode == 400 {
+					errorMsg = "Transaction rejected by node (malformed or invalid)"
+				} else if statusCode == 503 {
+					errorMsg = "Node mempool not available"
+				} else {
+					errorMsg = fmt.Sprintf("Node returned status %.0f", statusCode)
+				}
+				
+				reject.Invoke(map[string]interface{}{
+					"error": errorMsg,
+				})
+				return
+			}
+			
+			// Parse response
+			var response map[string]interface{}
+			responseBody := result["body"].(string)
+			if err := json.Unmarshal([]byte(responseBody), &response); err != nil {
+				reject.Invoke(map[string]interface{}{
+					"error": fmt.Sprintf("Failed to parse response: %s", err.Error()),
+				})
+				return
+			}
+			
+			// Success!
+			resolve.Invoke(map[string]interface{}{
+				"success":   true,
+				"status":    response["status"],
+				"tx_hash":   response["tx_hash"],
+				"message":   response["message"],
+				"broadcast": true,
+			})
+		}()
+		
+		return nil
+	})
+	
+	promiseConstructor := js.Global().Get("Promise")
+	return promiseConstructor.New(handler)
+}
+
+// jsArrayToGoArray converts a JavaScript array to a Go interface{} array
+func jsArrayToGoArray(jsArray js.Value) []interface{} {
+	if jsArray.IsUndefined() || jsArray.IsNull() {
+		return []interface{}{}
+	}
+	
+	length := jsArray.Length()
+	result := make([]interface{}, length)
+	
+	for i := 0; i < length; i++ {
+		item := jsArray.Index(i)
+		if item.Type() == js.TypeObject {
+			// Convert JS object to Go map
+			result[i] = jsObjectToGoMap(item)
+		} else {
+			// Convert primitive value
+			switch item.Type() {
+			case js.TypeString:
+				result[i] = item.String()
+			case js.TypeNumber:
+				result[i] = item.Float()
+			case js.TypeBoolean:
+				result[i] = item.Bool()
+			default:
+				result[i] = item.String() // fallback
+			}
+		}
+	}
+	
+	return result
+}
+
+// jsObjectToGoMap converts a JavaScript object to a Go map
+func jsObjectToGoMap(jsObj js.Value) map[string]interface{} {
+	result := make(map[string]interface{})
+	
+	// Get all property names (this is a simplified version)
+	// For transaction inputs/outputs, we know the expected fields
+	if !jsObj.Get("txid").IsUndefined() {
+		// This is a transaction input
+		result["txid"] = jsObj.Get("txid").String()
+		result["vout"] = uint32(jsObj.Get("vout").Float())
+		result["script_sig"] = jsObj.Get("script_sig").String()
+		result["sequence"] = uint32(jsObj.Get("sequence").Float())
+	} else if !jsObj.Get("value").IsUndefined() {
+		// This is a transaction output
+		result["value"] = uint64(jsObj.Get("value").Float())
+		result["script_pubkey"] = jsObj.Get("script_pubkey").String()
+		result["address"] = jsObj.Get("address").String()
+	}
+	
+	return result
+}

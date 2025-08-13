@@ -84,6 +84,11 @@ type Blockchain struct {
     // Synchronization
     mu sync.RWMutex
 
+    // Sync state tracking (for detecting stuck sync)
+    lastHeightChangeTime time.Time
+    stuckSyncAttempts    int
+    maxStuckAttempts     int
+
     // Storage
     dataDir string
 
@@ -112,6 +117,9 @@ func NewBlockchain(config *ShadowConfig) (*Blockchain, error) {
         blocks:         make(map[string]*Block),
         blocksByHeight: make(map[uint64]*Block),
         dataDir:        config.BlockchainDirectory,
+        lastHeightChangeTime: time.Now(),
+        stuckSyncAttempts:    0,
+        maxStuckAttempts:     3, // Reset after 3 failed attempts
     }
 
     // Ensure blockchain directory exists
@@ -488,9 +496,13 @@ func (bc *Blockchain) AddBlock(block *Block) error {
                 if err != nil {
                     log.Printf("❌ [BLOCKCHAIN] SHADOW liquidity provision failed: %v", err)
                     // Don't fail the block, just log the error
+                } else {
+                    log.Printf("✅ [BLOCKCHAIN] SHADOW liquidity provision completed for transaction %d", i)
                 }
             }
         }
+        
+        log.Printf("🔍 [BLOCKCHAIN] Finished processing transaction %d", i)
     }
 
     tokenExecDuration := time.Since(tokenExecStart)
@@ -618,8 +630,11 @@ func (bc *Blockchain) handleShadowLiquidityProvision(signedTx *SignedTransaction
             return fmt.Errorf("failed to handle SHADOW liquidity provision: %w", err)
         }
         log.Printf("✅ [BLOCKCHAIN] SHADOW liquidity provision completed successfully")
+    } else {
+        log.Printf("⚠️ [BLOCKCHAIN] No token executor available for liquidity provision")
     }
     
+    log.Printf("🔍 [BLOCKCHAIN] handleShadowLiquidityProvision returning successfully")
     return nil
 }
 
@@ -988,8 +1003,19 @@ func (bc *Blockchain) validateAndTrimChain() error {
         }
 
         log.Printf("✅ [BLOCKCHAIN] Chain validation complete, trimmed to height %d", lastValidHeight)
+        
+        // Check if we should trigger nuclear reset due to stuck sync
+        if shouldReset := bc.RecordSyncAttempt(uint64(lastValidHeight)); shouldReset {
+            log.Printf("🙀 [BLOCKCHAIN] Triggering nuclear reset due to repeated sync failures!")
+            if err := bc.NuclearReset(); err != nil {
+                log.Printf("❌ [BLOCKCHAIN] Nuclear reset failed: %v", err)
+                return fmt.Errorf("nuclear reset failed: %w", err)
+            }
+        }
     } else {
         log.Printf("✅ [BLOCKCHAIN] Chain validation complete, all %d blocks valid", bc.tipHeight+1)
+        // Record successful sync progress
+        bc.RecordSyncAttempt(bc.tipHeight)
     }
 
     return nil
@@ -1365,4 +1391,97 @@ func (bc *Blockchain) determineSyndicateWinner(farmerAddress string) SyndicateTy
 
     // No active syndicate membership found
     return soloMiner
+}
+
+// IsStuckInSync checks if the blockchain is stuck in a sync loop
+func (bc *Blockchain) IsStuckInSync() bool {
+    bc.mu.RLock()
+    defer bc.mu.RUnlock()
+    
+    // Consider stuck if same height for more than 5 minutes
+    stuckThreshold := 5 * time.Minute
+    return time.Since(bc.lastHeightChangeTime) > stuckThreshold
+}
+
+// RecordSyncAttempt records a sync attempt and checks if we should reset
+func (bc *Blockchain) RecordSyncAttempt(newHeight uint64) bool {
+    bc.mu.Lock()
+    defer bc.mu.Unlock()
+    
+    if newHeight > bc.tipHeight {
+        // Progress made - reset stuck counter
+        bc.tipHeight = newHeight
+        bc.lastHeightChangeTime = time.Now()
+        bc.stuckSyncAttempts = 0
+        return false
+    } else {
+        // No progress - increment stuck counter
+        bc.stuckSyncAttempts++
+        log.Printf("🐱 [BLOCKCHAIN] Sync attempt %d/%d failed (still at height %d)", 
+            bc.stuckSyncAttempts, bc.maxStuckAttempts, bc.tipHeight)
+        
+        if bc.stuckSyncAttempts >= bc.maxStuckAttempts {
+            log.Printf("🙀 [BLOCKCHAIN] Maximum stuck attempts reached! Time for nuclear reset...")
+            return true // Should reset
+        }
+    }
+    return false
+}
+
+// NuclearReset completely wipes the blockchain and starts from genesis
+// This is the "cat knocking stuff off the counter" solution
+func (bc *Blockchain) NuclearReset() error {
+    bc.mu.Lock()
+    defer bc.mu.Unlock()
+    
+    log.Printf("☢️  [BLOCKCHAIN] NUCLEAR RESET INITIATED - Wiping all blockchain data!")
+    log.Printf("🙀 [BLOCKCHAIN] *Cat knocking everything off the counter*")
+    
+    // Clear in-memory state
+    bc.blocks = make(map[string]*Block)
+    bc.blocksByHeight = make(map[uint64]*Block)
+    bc.tipHash = ""
+    bc.tipHeight = 0
+    bc.lastHeightChangeTime = time.Now()
+    bc.stuckSyncAttempts = 0
+    
+    // Remove all blockchain files
+    if err := os.RemoveAll(bc.dataDir); err != nil {
+        return fmt.Errorf("failed to remove blockchain directory: %w", err)
+    }
+    
+    // Recreate directory
+    if err := os.MkdirAll(bc.dataDir, 0755); err != nil {
+        return fmt.Errorf("failed to recreate blockchain directory: %w", err)
+    }
+    
+    // Reinitialize token system
+    tokenDataDir := filepath.Join(bc.dataDir, "tokens")
+    if err := os.MkdirAll(tokenDataDir, 0755); err != nil {
+        return fmt.Errorf("failed to create token directory: %w", err)
+    }
+    
+    // Reset token state
+    if bc.tokenState != nil {
+        newTokenState, err := NewTokenState(tokenDataDir)
+        if err != nil {
+            return fmt.Errorf("failed to reset token state: %w", err)
+        }
+        bc.tokenState = newTokenState
+    }
+    
+    // Reset token executor
+    if bc.tokenExecutor != nil {
+        bc.tokenExecutor = NewTokenExecutor(bc.tokenState, bc.syndicateManager)
+    }
+    
+    // Reset syndicate system
+    if bc.syndicateManager != nil {
+        bc.syndicateManager = NewSyndicateManager()
+    }
+    
+    log.Printf("☢️  [BLOCKCHAIN] Nuclear reset complete! Starting fresh from genesis.")
+    log.Printf("🐱 [BLOCKCHAIN] Counter is now clear - ready to sync from peers!")
+    
+    return nil
 }

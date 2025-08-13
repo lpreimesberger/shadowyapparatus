@@ -450,15 +450,26 @@ func (sn *ShadowNode) performHealthChecks() {
 	// Check blockchain health
 	if sn.blockchain != nil {
 		stats := sn.blockchain.GetStats()
-		sn.updateHealthStatus("blockchain", "healthy", nil, map[string]interface{}{
+		
+		// Check if blockchain is stuck in sync
+		status := "healthy"
+		var healthError error
+		if sn.blockchain.IsStuckInSync() {
+			status = "stuck_sync"
+			healthError = fmt.Errorf("blockchain appears to be stuck in sync loop")
+			log.Printf("⚠️  [NODE] Blockchain may be stuck in sync - consider running 'reset sync' if this persists")
+		}
+		
+		sn.updateHealthStatus("blockchain", status, healthError, map[string]interface{}{
 			"tip_height":         stats.TipHeight,
 			"total_blocks":       stats.TotalBlocks,
 			"total_transactions": stats.TotalTransactions,
 			"avg_block_size":     stats.AvgBlockSize,
+			"stuck_sync":         sn.blockchain.IsStuckInSync(),
 		})
 	}
 
-	// Check mempool health
+	// Check mempool health and perform cleanup
 	if sn.mempool != nil {
 		stats := sn.mempool.GetStats()
 		sn.updateHealthStatus("mempool", "healthy", nil, map[string]interface{}{
@@ -466,6 +477,12 @@ func (sn *ShadowNode) performHealthChecks() {
 			"total_size":       stats.TotalSize,
 			"valid_txs":        stats.ValidationStats.ValidTransactions,
 		})
+		
+		// Perform periodic cleanup of expired transactions (including swap orders)
+		expiredCount := sn.mempool.CleanupAllExpiredTransactions()
+		if expiredCount > 0 {
+			log.Printf("🧹 [NODE] Periodic cleanup removed %d expired transactions", expiredCount)
+		}
 	}
 	
 	// Check timelord health

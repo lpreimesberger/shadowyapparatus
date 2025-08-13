@@ -17,6 +17,10 @@ shadowy-tracker/*.pid
 shadowy-tracker/tracker*
 .idea
 test_build
+tmp
+*.wasm
+dist
+node_modules
 
 
 

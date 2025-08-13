@@ -47,6 +47,7 @@ const (
 	TRADE_EXECUTE                   // Execute/accept a trade offer
 	SYNDICATE_JOIN                  // Join a mining syndicate (creates membership NFT)
 	POOL_CREATE                     // Create a new liquidity pool NFT
+	POOL_SWAP                       // Swap tokens through a liquidity pool
 )
 
 // String returns the string representation of TokenOpType
@@ -66,6 +67,8 @@ func (t TokenOpType) String() string {
 		return "SYNDICATE_JOIN"
 	case POOL_CREATE:
 		return "POOL_CREATE"
+	case POOL_SWAP:
+		return "POOL_SWAP"
 	default:
 		return "UNKNOWN"
 	}
@@ -94,6 +97,7 @@ type TokenMetadata struct {
 	TradeOffer   *TradeOfferData `json:"trade_offer,omitempty"` // Trade offer data for marketplace NFTs
 	Syndicate    *SyndicateData  `json:"syndicate,omitempty"`   // Syndicate membership data for mining pool NFTs
 	LiquidityPool *LiquidityPoolData `json:"liquidity_pool,omitempty"` // Liquidity pool data
+	PoolSwap      *PoolSwapData      `json:"pool_swap,omitempty"`      // Pool swap parameters
 }
 
 // TradeOfferData contains the details of a trade offer locked in an NFT
@@ -175,6 +179,19 @@ type LiquidityPoolData struct {
 	ShareTokenID   string `json:"share_token_id"`   // Pool share token ID (owned by L-address)
 	Creator        string `json:"creator"`          // Pool creator address
 	CreationTime   int64  `json:"creation_time"`    // Unix timestamp of creation
+}
+
+// PoolSwapData contains parameters for AMM swaps with slippage protection
+type PoolSwapData struct {
+	PoolLAddress    string    `json:"pool_l_address"`              // L-address of the target liquidity pool
+	InputTokenID    string    `json:"input_token_id"`              // Token being swapped from (or "SHADOW")
+	OutputTokenID   string    `json:"output_token_id"`             // Token being swapped to (or "SHADOW")
+	MaxSlippage     uint64    `json:"max_slippage,omitempty"`      // Max slippage in basis points (e.g., 50 = 0.5%)
+	NotAfter        time.Time `json:"not_after,omitempty"`         // Expiration time (max 7 days from current block)
+	AllOrNothing    bool      `json:"all_or_nothing,omitempty"`    // Execute full amount or fail completely
+	MinReceived     uint64    `json:"min_received,omitempty"`      // Minimum output amount (if not all_or_nothing)
+	SwapperAddress  string    `json:"swapper_address"`             // Address performing the swap
+	CreationTime    int64     `json:"creation_time"`               // Unix timestamp when swap was created
 }
 
 // JOSEHeader provides JOSE-style header information
@@ -279,6 +296,23 @@ func (tx *Transaction) AddTokenTransfer(tokenID string, amount uint64, from, to 
 		Amount:  amount,
 		From:    from,
 		To:      to,
+	}
+	
+	tx.AddTokenOperation(tokenOp)
+}
+
+// AddPoolSwap adds a pool swap operation with slippage protection
+func (tx *Transaction) AddPoolSwap(swapData *PoolSwapData, inputAmount uint64) {
+	tokenOp := TokenOperation{
+		Type:    POOL_SWAP,
+		TokenID: swapData.InputTokenID,
+		Amount:  inputAmount,
+		From:    swapData.SwapperAddress,
+		To:      swapData.PoolLAddress,
+		Metadata: &TokenMetadata{
+			PoolSwap:     swapData,
+			CreationTime: swapData.CreationTime,
+		},
 	}
 	
 	tx.AddTokenOperation(tokenOp)
@@ -803,7 +837,8 @@ func validateTokenOperation(tokenOp TokenOperation, index int) error {
 		return fmt.Errorf("token operation %d: token ID cannot be empty", index)
 	}
 	
-	if len(tokenOp.TokenID) != 64 {
+	// POOL_SWAP operations have their own token ID validation that allows "SHADOW"
+	if tokenOp.Type != POOL_SWAP && len(tokenOp.TokenID) != 64 {
 		return fmt.Errorf("token operation %d: invalid token ID length (expected 64 hex chars)", index)
 	}
 	
@@ -828,6 +863,8 @@ func validateTokenOperation(tokenOp TokenOperation, index int) error {
 		return validateSyndicateJoin(tokenOp, index)
 	case POOL_CREATE:
 		return validatePoolCreate(tokenOp, index)
+	case POOL_SWAP:
+		return validatePoolSwap(tokenOp, index)
 	default:
 		return fmt.Errorf("token operation %d: unknown operation type %d", index, tokenOp.Type)
 	}
@@ -1138,6 +1175,114 @@ func validatePoolCreate(tokenOp TokenOperation, index int) error {
 		if tokenOp.Metadata.LockAmount == 0 {
 			return fmt.Errorf("token operation %d: initial reserve amount is required in metadata", index)
 		}
+	}
+	
+	return nil
+}
+
+// validatePoolSwap validates pool swap operation with comprehensive checks
+func validatePoolSwap(tokenOp TokenOperation, index int) error {
+	// Must have metadata with pool swap data
+	if tokenOp.Metadata == nil {
+		return fmt.Errorf("token operation %d: POOL_SWAP operation requires metadata", index)
+	}
+	
+	if tokenOp.Metadata.PoolSwap == nil {
+		return fmt.Errorf("token operation %d: POOL_SWAP operation requires pool swap data", index)
+	}
+	
+	swap := tokenOp.Metadata.PoolSwap
+	
+	// Validate pool L-address
+	if swap.PoolLAddress == "" {
+		return fmt.Errorf("token operation %d: pool L-address cannot be empty", index)
+	}
+	
+	if !IsValidLAddress(swap.PoolLAddress) {
+		return fmt.Errorf("token operation %d: invalid pool L-address format", index)
+	}
+	
+	// Validate input and output token IDs
+	if swap.InputTokenID == "" {
+		return fmt.Errorf("token operation %d: input token ID cannot be empty", index)
+	}
+	
+	if swap.OutputTokenID == "" {
+		return fmt.Errorf("token operation %d: output token ID cannot be empty", index)
+	}
+	
+	// Input and output tokens must be different
+	if swap.InputTokenID == swap.OutputTokenID {
+		return fmt.Errorf("token operation %d: input and output tokens cannot be the same", index)
+	}
+	
+	// Validate token IDs (either "SHADOW" or 64-char hex)
+	if swap.InputTokenID != "SHADOW" && len(swap.InputTokenID) != 64 {
+		return fmt.Errorf("token operation %d: invalid input token ID format", index)
+	}
+	
+	if swap.OutputTokenID != "SHADOW" && len(swap.OutputTokenID) != 64 {
+		return fmt.Errorf("token operation %d: invalid output token ID format", index)
+	}
+	
+	// Validate swapper address
+	if swap.SwapperAddress == "" {
+		return fmt.Errorf("token operation %d: swapper address cannot be empty", index)
+	}
+	
+	if !IsValidAddress(swap.SwapperAddress) {
+		return fmt.Errorf("token operation %d: invalid swapper address format", index)
+	}
+	
+	// Validate token operation fields match swap data
+	if tokenOp.TokenID != swap.InputTokenID {
+		return fmt.Errorf("token operation %d: token ID must match input token ID", index)
+	}
+	
+	if tokenOp.From != swap.SwapperAddress {
+		return fmt.Errorf("token operation %d: from address must match swapper address", index)
+	}
+	
+	if tokenOp.To != swap.PoolLAddress {
+		return fmt.Errorf("token operation %d: to address must match pool L-address", index)
+	}
+	
+	// Validate amount (input amount)
+	if tokenOp.Amount == 0 {
+		return fmt.Errorf("token operation %d: swap input amount cannot be zero", index)
+	}
+	
+	// Validate slippage parameters
+	if swap.MaxSlippage > 10000 { // 100% in basis points
+		return fmt.Errorf("token operation %d: max slippage cannot exceed 100%% (10000 basis points)", index)
+	}
+	
+	// Validate expiration time
+	if !swap.NotAfter.IsZero() {
+		if swap.NotAfter.Before(time.Now().UTC()) {
+			return fmt.Errorf("token operation %d: swap has already expired", index)
+		}
+		
+		// Max 7 days expiration
+		maxExpiration := time.Now().UTC().Add(7 * 24 * time.Hour)
+		if swap.NotAfter.After(maxExpiration) {
+			return fmt.Errorf("token operation %d: swap expiration cannot exceed 7 days", index)
+		}
+	}
+	
+	// Validate execution parameters
+	if swap.AllOrNothing && swap.MinReceived > 0 {
+		return fmt.Errorf("token operation %d: cannot specify both all_or_nothing and min_received", index)
+	}
+	
+	// Validate creation time
+	if swap.CreationTime == 0 {
+		return fmt.Errorf("token operation %d: creation time is required", index)
+	}
+	
+	// Creation time should not be in the future
+	if swap.CreationTime > time.Now().UTC().Unix() {
+		return fmt.Errorf("token operation %d: creation time cannot be in the future", index)
 	}
 	
 	return nil
