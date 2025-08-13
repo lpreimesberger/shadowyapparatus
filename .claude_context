@@ -1,0 +1,222 @@
+# Shadowy Blockchain Project - Claude Context
+
+## Project Overview
+Shadowy is a post-quantum blockchain using ML-DSA-87 (Dilithium Mode3) cryptography instead of traditional elliptic curves. The project includes a full node implementation, WASM library, and CLI tools.
+
+## Key Architecture Components
+
+### Post-Quantum Cryptography
+- **Algorithm**: ML-DSA-87 (Dilithium Mode3) via `github.com/cloudflare/circl/sign/mldsa/mldsa87`
+- **Seed Size**: 64 bytes (not 32 like Ed25519)
+- **Signature Size**: 4627 bytes (much larger than Ed25519's ~64 bytes)
+- **Key Generation**: `mldsa87.GenerateKey(bytes.NewReader(seed))`
+- **Signing**: `mldsa87.SignTo(privateKey, message, nil, false, signature)`
+
+### Address Format
+- **S-addresses**: 51 characters, format: `S` + 50 hex chars
+- **L-addresses**: 41 characters (legacy format)
+- **Generation**: SHAKE256(publicKey) + version(0x42) + double Keccak256 checksum
+- **Example**: `S422a86b848970d44c04983c7feed9a0d200a1b1f8e0824d7b5`
+
+### Transaction Format (Node-Expected)
+```go
+type SignedTransaction struct {
+    Transaction json.RawMessage `json:"transaction"`
+    Signature   string          `json:"signature"`   // Single signature (not array)
+    TxHash      string          `json:"tx_hash"`     
+    SignerKey   string          `json:"signer_key"`  
+    Algorithm   string          `json:"algorithm"`   // "ML-DSA-87"
+    Header      JOSEHeader      `json:"header"`      
+}
+
+type Transaction struct {
+    Version   int                 `json:"version"`
+    Inputs    []TransactionInput  `json:"inputs"`
+    Outputs   []TransactionOutput `json:"outputs"`
+    Locktime  uint32              `json:"locktime"`
+    Timestamp string              `json:"timestamp"` // ISO format, not Unix timestamp
+}
+```
+
+## Directory Structure
+
+### Core Blockchain (`/cmd/`)
+- `http_server.go` - HTTP API server, endpoints documented below
+- `transaction.go` - Transaction validation and SignedTransaction struct
+- `crypto.go` - ML-DSA-87 cryptographic functions
+- `mempool.go` - Transaction pool management
+- `blockchain.go` - Main blockchain logic
+- `wallet.go` - Wallet operations and balance calculations
+- `token_state.go` - Token balance tracking
+- `token_executor.go` - Token operation execution
+- `consensus_handlers.go` - Consensus protocol handlers
+
+### WASM Library (`/shadowy-wasm/`)
+- `main.go` - Complete WASM implementation with ML-DSA-87
+- `build.sh` - Builds WASM binary
+- `shadowy.wasm` - Compiled WASM binary
+- `wasm_exec.js` - Go WASM runtime
+
+### CLI Interface (`/shadowy-cli/`)
+- `main.js` - Node.js CLI that uses WASM library
+- Supports: wallet, balance, send, node commands
+
+## HTTP API Endpoints (Port 8080)
+
+### Health & Status
+- `GET /api/v1/health` - Health check
+- `GET /api/v1/status` - Node status
+- `GET /api/v1/version` - Version info
+
+### Balance & Addresses
+- `GET /api/v1/address/{address}/balance` - Get balance for any address ⭐
+- `GET /api/v1/wallet/{name}/balance` - Get balance for wallet file
+- `GET /api/v1/utxos?address={address}` - Get UTXOs for address ⭐ **NEW**
+- `POST /api/v1/utils/validate-address` - Validate address format
+
+### Mempool & Transactions  
+- `POST /api/v1/mempool/transactions` - Submit signed transaction ⭐
+- `GET /api/v1/mempool/transactions/{hash}` - Get transaction
+- `GET /api/v1/mempool/transactions` - List pending transactions
+- `GET /api/v1/mempool` - Mempool stats
+
+### Blockchain Data
+- `GET /api/v1/blockchain` - Blockchain stats
+- `GET /api/v1/blockchain/tip` - Latest block
+- `GET /api/v1/blockchain/block/{hash}` - Get block by hash
+- `GET /api/v1/blockchain/block/height/{height}` - Get block by height
+
+### Token System
+- `GET /api/v1/tokens` - List all tokens
+- `GET /api/v1/tokens/{token_id}` - Get token info
+- `GET /api/v1/tokens/balances/{address}` - Get all token balances for address
+- `GET /api/v1/tokens/{token_id}/balance/{address}` - Get specific token balance
+
+### Mining & Farming (if enabled)
+- `GET /api/v1/mining` - Mining stats
+- `GET /api/v1/farming` - Farming stats
+- `POST /api/v1/mining/force` - Force mine block
+
+## Key Data Structures
+
+### Balance Response (from `/api/v1/address/{address}/balance`)
+```json
+{
+  "address": "S422a86b848970d44c04983c7feed9a0d200a1b1f8e0824d7b5",
+  "balance": 38.46700001,
+  "balance_satoshis": 3846700001,
+  "confirmed": 38.46700001,
+  "confirmed_satoshis": 3846700001,
+  "unconfirmed": 0,
+  "unconfirmed_satoshis": 0,
+  "total_received": 38.46700001,
+  "total_received_satoshis": 3846700001,
+  "total_sent": 0,
+  "total_sent_satoshis": 0,
+  "transaction_count": 5,
+  "last_activity": "2025-08-11T10:06:09.262268356Z"
+}
+```
+
+### UTXO Structure
+```go
+type UTXO struct {
+    TxID         string `json:"txid"`
+    Vout         uint32 `json:"vout"`
+    Value        uint64 `json:"value"`
+    ScriptPubkey string `json:"script_pubkey"`
+    Address      string `json:"address"`
+    Confirmations int   `json:"confirmations"`
+}
+```
+
+## WASM Integration
+
+### HTTP Bridge Pattern
+The WASM library communicates via JavaScript bridges:
+- `global.shadowy_http_bridge` - HTTP requests (returns `{result: {status_code, body, headers}}`)
+- `global.shadowy_crypto_bridge` - File I/O and crypto operations
+
+### Wallet Storage
+- Location: `~/.shadowy/shadowy-wallet-{name}.json`
+- Format: Version 3 with ML-DSA-87 keys
+- Fields: `seed` (64-byte base64), `public_key`, `address`, `version: 3`
+
+### Promise Handling in WASM
+⚠️ **Critical Pattern**: HTTP responses return `{result: {status_code, body}}`, not direct access:
+```go
+// WRONG
+statusCode := response.Get("status_code").Int()
+
+// CORRECT  
+result := response.Get("result")
+statusCode := result.Get("status_code").Int()
+```
+
+## Common Operations
+
+### Build WASM
+```bash
+cd shadowy-wasm && ./build.sh
+```
+
+### Test CLI Commands
+```bash
+cd shadowy-cli
+node main.js wallet create test-wallet
+node main.js balance S422a86b848970d44c04983c7feed9a0d200a1b1f8e0824d7b5
+node main.js send -s test-wallet -d S427a724d41e3a5a03d1f83553134239813272bc2c4b2d50737 -a 1.5
+```
+
+### Start Node
+```bash
+./shadowy node --config config.json --port 8080
+```
+
+## Current Status (as of session end)
+
+### ✅ Completed
+- ML-DSA-87 post-quantum transaction signing (4627-byte signatures)
+- Complete send workflow (WASM → Node mempool → HTTP 202 Accepted)
+- Balance command (real blockchain data)  
+- Transaction format matching node expectations
+- WASM Promise/HTTP handling fixes
+- **Real UTXO API endpoint and integration** ⭐ **NEW**
+
+### 🔄 In Progress  
+- Complete UTXO selection algorithm (uses real blockchain data now)
+
+### 📋 Pending
+- Strip transaction logic from main blockchain to use WASM universally
+
+## Key Files for Transaction Flow
+
+1. **WASM Transaction Signing**: `/shadowy-wasm/main.go` - `signTransaction()` function
+2. **Node Transaction Receipt**: `/cmd/http_server.go` - `handleSubmitTransaction()`  
+3. **Transaction Validation**: `/cmd/mempool_validators.go`
+4. **Mempool Storage**: `/cmd/mempool.go`
+
+## Debugging Tips
+
+### WASM Debug Logging
+Add logging in WASM: `log.Printf("🔍 Debug: %+v", data)`
+
+### Node Logs  
+Monitor node with: `tail -f node.log`
+
+### HTTP Response Debugging
+Check actual API responses: `curl -X GET "http://127.0.0.1:8080/api/v1/address/{address}/balance"`
+
+### Common Issues
+1. **Promise ValueOf panics**: Return `map[string]interface{}` instead of structs
+2. **HTTP response undefined**: Use `response.Get("result").Get("field")` pattern
+3. **Transaction rejected**: Check SignedTransaction format matches `cmd/transaction.go`
+4. **ML-DSA signature size**: Should be exactly 4627 bytes in base64
+
+## Recent Fixes Applied
+
+1. **Transaction Format**: Changed from `signatures[]` array to single `signature` string
+2. **Timestamp Format**: Changed from Unix int64 to ISO string format  
+3. **Balance API**: Fixed endpoint from `/balance?address=` to `/address/{addr}/balance`
+4. **HTTP Response Parsing**: Fixed Promise wrapper argument passing
+5. **WASM Return Values**: Convert structs to maps for JavaScript compatibility

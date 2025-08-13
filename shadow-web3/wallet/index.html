@@ -1,0 +1,1160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shadowy Wallet - Post-Quantum Web3</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .header {
+            background: rgba(0, 0, 0, 0.1);
+            backdrop-filter: blur(10px);
+            padding: 1rem 2rem;
+            color: white;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .connection-status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.9rem;
+        }
+        
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ff4757;
+        }
+        
+        .status-indicator.connected {
+            background: #2ed573;
+        }
+        
+        .status-indicator.offline {
+            background: #ffa502;
+        }
+        
+        .main-container {
+            flex: 1;
+            display: flex;
+            max-width: 1200px;
+            margin: 0 auto;
+            width: 100%;
+            gap: 2rem;
+            padding: 2rem;
+        }
+        
+        .sidebar {
+            width: 300px;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 1.5rem;
+            height: fit-content;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+        
+        .content {
+            flex: 1;
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 2rem;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+        }
+        
+        .wallet-section {
+            margin-bottom: 2rem;
+        }
+        
+        .wallet-section h3 {
+            margin-bottom: 1rem;
+            color: #2c3e50;
+            font-size: 1.1rem;
+        }
+        
+        .wallet-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 1.5rem;
+            border-radius: 12px;
+            margin-bottom: 1rem;
+        }
+        
+        .wallet-name {
+            font-size: 1.2rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+        }
+        
+        .wallet-address {
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+            font-size: 0.8rem;
+            opacity: 0.9;
+            word-break: break-all;
+            background: rgba(0, 0, 0, 0.1);
+            padding: 0.5rem;
+            border-radius: 6px;
+            margin-bottom: 1rem;
+        }
+        
+        .wallet-balance {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .balance-amount {
+            font-size: 1.5rem;
+            font-weight: bold;
+        }
+        
+        .balance-usd {
+            font-size: 0.9rem;
+            opacity: 0.8;
+        }
+        
+        .btn {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            font-weight: 500;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            justify-content: center;
+            width: 100%;
+            margin-bottom: 0.5rem;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(52, 152, 219, 0.3);
+        }
+        
+        .btn:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        .btn.primary {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+        
+        .btn.success {
+            background: #27ae60;
+        }
+        
+        .btn.danger {
+            background: #e74c3c;
+        }
+        
+        .btn.small {
+            padding: 0.5rem 1rem;
+            font-size: 0.8rem;
+        }
+        
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        
+        .form-group label {
+            display: block;
+            margin-bottom: 0.5rem;
+            color: #2c3e50;
+            font-weight: 500;
+        }
+        
+        .form-group input,
+        .form-group select {
+            width: 100%;
+            padding: 0.75rem;
+            border: 2px solid #ecf0f1;
+            border-radius: 8px;
+            font-size: 0.9rem;
+            transition: border-color 0.2s;
+        }
+        
+        .form-group input:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+        
+        .tabs {
+            display: flex;
+            margin-bottom: 2rem;
+            border-bottom: 1px solid #ecf0f1;
+        }
+        
+        .tab {
+            padding: 1rem 1.5rem;
+            cursor: pointer;
+            border-bottom: 3px solid transparent;
+            color: #7f8c8d;
+            transition: all 0.2s;
+        }
+        
+        .tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+        }
+        
+        .tab-content {
+            display: none;
+        }
+        
+        .tab-content.active {
+            display: block;
+        }
+        
+        .transaction-list {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        
+        .transaction-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 1rem;
+            border-bottom: 1px solid #ecf0f1;
+            transition: background 0.2s;
+        }
+        
+        .transaction-item:hover {
+            background: #f8f9fa;
+        }
+        
+        .transaction-info {
+            flex: 1;
+        }
+        
+        .transaction-hash {
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+            font-size: 0.8rem;
+            color: #7f8c8d;
+            margin-bottom: 0.25rem;
+        }
+        
+        .transaction-details {
+            font-size: 0.9rem;
+            color: #2c3e50;
+        }
+        
+        .transaction-amount {
+            font-weight: bold;
+            font-size: 1.1rem;
+        }
+        
+        .transaction-amount.positive {
+            color: #27ae60;
+        }
+        
+        .transaction-amount.negative {
+            color: #e74c3c;
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(5px);
+            z-index: 1000;
+        }
+        
+        .modal.show {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .modal-content {
+            background: white;
+            padding: 2rem;
+            border-radius: 16px;
+            max-width: 500px;
+            width: 90%;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+        
+        .modal-title {
+            font-size: 1.3rem;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        
+        .close-btn {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: #7f8c8d;
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .close-btn:hover {
+            background: #ecf0f1;
+        }
+        
+        .alert {
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .alert.success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        
+        .alert.error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        
+        .alert.info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+        
+        .loading-spinner {
+            width: 20px;
+            height: 20px;
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .wallet-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .wallet-list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0.75rem;
+            border: 1px solid #ecf0f1;
+            border-radius: 8px;
+            margin-bottom: 0.5rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .wallet-list-item:hover {
+            border-color: #667eea;
+            transform: translateY(-1px);
+        }
+        
+        .wallet-list-info {
+            flex: 1;
+        }
+        
+        .wallet-list-name {
+            font-weight: 500;
+            margin-bottom: 0.25rem;
+        }
+        
+        .wallet-list-address {
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+            font-size: 0.7rem;
+            color: #7f8c8d;
+        }
+        
+        .network-selector {
+            margin-bottom: 1rem;
+        }
+        
+        @media (max-width: 768px) {
+            .main-container {
+                flex-direction: column;
+                padding: 1rem;
+                gap: 1rem;
+            }
+            
+            .sidebar {
+                width: 100%;
+            }
+            
+            .header {
+                padding: 1rem;
+            }
+            
+            .tabs {
+                overflow-x: auto;
+                white-space: nowrap;
+            }
+        }
+        
+        .qr-code {
+            text-align: center;
+            padding: 1rem;
+        }
+        
+        .copy-button {
+            background: none;
+            border: 1px solid #667eea;
+            color: #667eea;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.7rem;
+            margin-left: 0.5rem;
+            transition: all 0.2s;
+        }
+        
+        .copy-button:hover {
+            background: #667eea;
+            color: white;
+        }
+        
+        .seed-phrase {
+            background: #f8f9fa;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+            word-spacing: 0.5rem;
+            line-height: 1.6;
+        }
+        
+        .security-warning {
+            background: #fff3cd;
+            border: 1px solid #ffeaa7;
+            color: #856404;
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+        }
+        
+        .security-warning strong {
+            display: block;
+            margin-bottom: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <div class="logo">
+            <span>🌙</span>
+            <span>Shadowy Wallet</span>
+        </div>
+        <div class="connection-status">
+            <div class="status-indicator" id="connection-indicator"></div>
+            <span id="connection-text">Initializing...</span>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <div class="sidebar">
+            <!-- Network Selection -->
+            <div class="wallet-section">
+                <h3>Network</h3>
+                <div class="network-selector">
+                    <select id="network-select">
+                        <option value="local">Local Node (8080)</option>
+                        <option value="testnet">Testnet</option>
+                        <option value="offline">Offline Mode</option>
+                        <option value="custom">Custom Node</option>
+                    </select>
+                </div>
+                <div class="form-group" id="custom-node-group" style="display: none;">
+                    <input type="text" id="custom-node-url" placeholder="http://localhost:8080">
+                    <button class="btn small" onclick="connectToCustomNode()">Connect</button>
+                </div>
+            </div>
+
+            <!-- Current Wallet -->
+            <div class="wallet-section">
+                <h3>Current Wallet</h3>
+                <div id="current-wallet" style="display: none;">
+                    <div class="wallet-card">
+                        <div class="wallet-name" id="wallet-name">My Wallet</div>
+                        <div class="wallet-address" id="wallet-address">
+                            S1234567890abcdef...
+                            <button class="copy-button" onclick="copyAddress()">Copy</button>
+                        </div>
+                        <div class="wallet-balance">
+                            <div>
+                                <div class="balance-amount" id="balance-amount">0.00000000</div>
+                                <div class="balance-usd" id="balance-usd">≈ $0.00</div>
+                            </div>
+                            <div>SHADOW</div>
+                        </div>
+                    </div>
+                    <button class="btn success" onclick="refreshBalance()">
+                        <span class="loading-spinner" id="refresh-spinner" style="display: none;"></span>
+                        Refresh Balance
+                    </button>
+                    <button class="btn danger" onclick="lockWallet()">Lock Wallet</button>
+                </div>
+
+                <div id="no-wallet">
+                    <button class="btn primary" onclick="showCreateWallet()">Create Wallet</button>
+                    <button class="btn" onclick="showLoadWallet()">Load Wallet</button>
+                </div>
+            </div>
+
+            <!-- Quick Actions -->
+            <div class="wallet-section" id="quick-actions" style="display: none;">
+                <h3>Quick Actions</h3>
+                <button class="btn" onclick="showSendModal()">Send SHADOW</button>
+                <button class="btn" onclick="showReceiveModal()">Receive</button>
+                <button class="btn" onclick="showTransactionHistory()">History</button>
+            </div>
+        </div>
+
+        <div class="content">
+            <!-- Tabs -->
+            <div class="tabs">
+                <div class="tab active" onclick="switchTab('dashboard')">Dashboard</div>
+                <div class="tab" onclick="switchTab('send')">Send</div>
+                <div class="tab" onclick="switchTab('receive')">Receive</div>
+                <div class="tab" onclick="switchTab('history')">History</div>
+                <div class="tab" onclick="switchTab('settings')">Settings</div>
+            </div>
+
+            <!-- Dashboard Tab -->
+            <div class="tab-content active" id="dashboard-tab">
+                <div id="wallet-dashboard" style="display: none;">
+                    <h2>Portfolio Overview</h2>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1.5rem; margin: 2rem 0;">
+                        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 1.5rem; border-radius: 12px;">
+                            <h3>Total Balance</h3>
+                            <div style="font-size: 2rem; font-weight: bold; margin: 0.5rem 0;" id="dashboard-balance">0.00000000 SHADOW</div>
+                            <div style="opacity: 0.8;" id="dashboard-usd">≈ $0.00</div>
+                        </div>
+                        <div style="background: #27ae60; color: white; padding: 1.5rem; border-radius: 12px;">
+                            <h3>Available UTXOs</h3>
+                            <div style="font-size: 2rem; font-weight: bold; margin: 0.5rem 0;" id="dashboard-utxos">0</div>
+                            <div style="opacity: 0.8;">Spendable outputs</div>
+                        </div>
+                    </div>
+
+                    <div id="recent-transactions">
+                        <h3>Recent Transactions</h3>
+                        <div class="transaction-list" id="recent-tx-list">
+                            <div style="text-align: center; padding: 2rem; color: #7f8c8d;">
+                                No transactions yet
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="welcome-screen">
+                    <div style="text-align: center; padding: 4rem 2rem;">
+                        <div style="font-size: 4rem; margin-bottom: 1rem;">🌙</div>
+                        <h2>Welcome to Shadowy Wallet</h2>
+                        <p style="color: #7f8c8d; margin: 1rem 0 2rem;">The first post-quantum Web3 wallet. Secure, private, and future-proof.</p>
+                        <button class="btn primary" onclick="showCreateWallet()" style="margin-right: 1rem;">Create New Wallet</button>
+                        <button class="btn" onclick="showLoadWallet()">Load Existing Wallet</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Send Tab -->
+            <div class="tab-content" id="send-tab">
+                <h2>Send SHADOW</h2>
+                <div id="send-form">
+                    <div class="form-group">
+                        <label for="send-to-address">Recipient Address</label>
+                        <input type="text" id="send-to-address" placeholder="S1234567890abcdef...">
+                    </div>
+                    <div class="form-group">
+                        <label for="send-amount">Amount (SHADOW)</label>
+                        <input type="number" id="send-amount" step="0.00000001" min="0" placeholder="0.00000000">
+                        <div style="font-size: 0.8rem; color: #7f8c8d; margin-top: 0.25rem;">
+                            Available: <span id="available-balance">0.00000000</span> SHADOW
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="send-fee">Transaction Fee (SHADOW)</label>
+                        <input type="number" id="send-fee" value="0.011" step="0.00000001" min="0">
+                    </div>
+                    <button class="btn primary" onclick="sendTransaction()" id="send-btn" disabled>
+                        Send Transaction
+                    </button>
+                </div>
+                <div id="send-result" style="margin-top: 2rem;"></div>
+            </div>
+
+            <!-- Receive Tab -->
+            <div class="tab-content" id="receive-tab">
+                <h2>Receive SHADOW</h2>
+                <div id="receive-content" style="text-align: center;">
+                    <div style="margin: 2rem 0;">
+                        <div id="qr-code-container" class="qr-code">
+                            <!-- QR code will be generated here -->
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label>Your Address</label>
+                        <input type="text" id="receive-address" readonly>
+                        <button class="btn small" onclick="copyAddress()" style="margin-top: 0.5rem;">Copy Address</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- History Tab -->
+            <div class="tab-content" id="history-tab">
+                <h2>Transaction History</h2>
+                <div class="transaction-list" id="history-list">
+                    <div style="text-align: center; padding: 2rem; color: #7f8c8d;">
+                        No transactions found
+                    </div>
+                </div>
+            </div>
+
+            <!-- Settings Tab -->
+            <div class="tab-content" id="settings-tab">
+                <h2>Settings</h2>
+                <div class="wallet-section">
+                    <h3>Wallet Management</h3>
+                    <button class="btn" onclick="showBackupWallet()">Backup Wallet</button>
+                    <button class="btn" onclick="showDeleteWallet()">Delete Wallet</button>
+                    <button class="btn" onclick="exportWallet()">Export Private Key</button>
+                </div>
+                
+                <div class="wallet-section">
+                    <h3>Network Settings</h3>
+                    <div class="form-group">
+                        <label>Default Node URL</label>
+                        <input type="text" id="default-node" value="http://localhost:8080">
+                    </div>
+                    <button class="btn" onclick="saveSettings()">Save Settings</button>
+                </div>
+
+                <div class="wallet-section">
+                    <h3>Security</h3>
+                    <div class="form-group">
+                        <label>Storage Mode</label>
+                        <select id="storage-mode">
+                            <option value="localStorage">Persistent (localStorage)</option>
+                            <option value="sessionStorage">Session only (sessionStorage)</option>
+                            <option value="memory">Memory only (no storage)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modals -->
+    <div class="modal" id="create-wallet-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">Create New Wallet</div>
+                <button class="close-btn" onclick="hideModal('create-wallet-modal')">&times;</button>
+            </div>
+            <div class="form-group">
+                <label for="new-wallet-name">Wallet Name</label>
+                <input type="text" id="new-wallet-name" placeholder="My Wallet">
+            </div>
+            <div class="security-warning">
+                <strong>⚠️ Important Security Notice</strong>
+                Your wallet will be encrypted and stored in your browser. Make sure to backup your private key!
+            </div>
+            <button class="btn primary" onclick="createWallet()">Create Wallet</button>
+        </div>
+    </div>
+
+    <div class="modal" id="load-wallet-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">Load Wallet</div>
+                <button class="close-btn" onclick="hideModal('load-wallet-modal')">&times;</button>
+            </div>
+            <div class="wallet-list" id="available-wallets">
+                <div style="text-align: center; padding: 2rem; color: #7f8c8d;">
+                    Loading wallets...
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="backup-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <div class="modal-title">Backup Wallet</div>
+                <button class="close-btn" onclick="hideModal('backup-modal')">&times;</button>
+            </div>
+            <div class="security-warning">
+                <strong>🔐 Keep Your Private Key Safe</strong>
+                Write down or securely store your private key. This is the only way to recover your wallet!
+            </div>
+            <div class="form-group">
+                <label>Private Key</label>
+                <textarea id="backup-private-key" rows="4" readonly></textarea>
+                <button class="btn small" onclick="copyPrivateKey()">Copy Private Key</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Include Go WASM runtime -->
+    <script src="../demo/wasm_exec.js"></script>
+    <!-- Include our compiled ShadowyWeb3 library -->
+    <script src="../dist/shadowy-web3.js"></script>
+    
+    <script>
+        // Global state
+        let shadowyWeb3;
+        let currentWallet = null;
+        let currentBalance = null;
+
+        // Initialize application
+        async function initApp() {
+            try {
+                updateConnectionStatus('connecting', 'Initializing...');
+                
+                // Initialize ShadowyWeb3
+                shadowyWeb3 = new ShadowyWeb3.default({
+                    storage: 'localStorage',
+                    network: 'local'
+                });
+
+                // Set up event listeners
+                setupEventListeners();
+
+                // Initialize WASM
+                await shadowyWeb3.initialize();
+                
+                // Try to connect to local node by default
+                await connectToLocalNode();
+
+                // Load saved settings
+                loadSavedSettings();
+
+                updateConnectionStatus('offline', 'Working Offline');
+                
+            } catch (error) {
+                console.error('Failed to initialize:', error);
+                updateConnectionStatus('error', `Error: ${error.message}`);
+            }
+        }
+
+        function setupEventListeners() {
+            shadowyWeb3.on('wallet:created', (wallet) => {
+                console.log('Wallet created:', wallet);
+                currentWallet = wallet;
+                updateWalletUI();
+                hideModal('create-wallet-modal');
+            });
+
+            shadowyWeb3.on('wallet:loaded', (wallet) => {
+                console.log('Wallet loaded:', wallet);
+                currentWallet = wallet;
+                updateWalletUI();
+                hideModal('load-wallet-modal');
+            });
+
+            shadowyWeb3.on('transaction:signed', (result) => {
+                console.log('Transaction signed:', result);
+            });
+
+            shadowyWeb3.on('transaction:broadcast', (result) => {
+                console.log('Transaction broadcast:', result);
+                refreshBalance();
+            });
+
+            shadowyWeb3.on('error', (error) => {
+                console.error('ShadowyWeb3 error:', error);
+                showAlert(error.message, 'error');
+            });
+
+            // Network selector
+            document.getElementById('network-select').addEventListener('change', (e) => {
+                const value = e.target.value;
+                const customGroup = document.getElementById('custom-node-group');
+                
+                if (value === 'custom') {
+                    customGroup.style.display = 'block';
+                } else {
+                    customGroup.style.display = 'none';
+                    handleNetworkChange(value);
+                }
+            });
+        }
+
+        async function handleNetworkChange(network) {
+            try {
+                switch (network) {
+                    case 'local':
+                        await connectToLocalNode();
+                        break;
+                    case 'testnet':
+                        // Implement testnet connection
+                        updateConnectionStatus('offline', 'Testnet not available');
+                        break;
+                    case 'offline':
+                        shadowyWeb3.disconnectFromNode();
+                        updateConnectionStatus('offline', 'Working Offline');
+                        break;
+                }
+            } catch (error) {
+                console.error('Network change failed:', error);
+                updateConnectionStatus('offline', 'Working Offline');
+            }
+        }
+
+        async function connectToLocalNode() {
+            try {
+                shadowyWeb3.connectToNode({ url: 'http://localhost:8080' });
+                const isConnected = await shadowyWeb3.testConnection();
+                
+                if (isConnected) {
+                    updateConnectionStatus('connected', 'Connected to Local Node');
+                    if (currentWallet) {
+                        refreshBalance();
+                    }
+                } else {
+                    updateConnectionStatus('offline', 'Local Node Offline');
+                }
+            } catch (error) {
+                updateConnectionStatus('offline', 'Working Offline');
+            }
+        }
+
+        async function connectToCustomNode() {
+            try {
+                const url = document.getElementById('custom-node-url').value;
+                if (!url) return;
+
+                shadowyWeb3.connectToNode({ url });
+                const isConnected = await shadowyWeb3.testConnection();
+                
+                if (isConnected) {
+                    updateConnectionStatus('connected', `Connected to ${url}`);
+                    if (currentWallet) {
+                        refreshBalance();
+                    }
+                } else {
+                    updateConnectionStatus('offline', 'Connection Failed');
+                }
+            } catch (error) {
+                updateConnectionStatus('offline', 'Connection Error');
+            }
+        }
+
+        function updateConnectionStatus(status, text) {
+            const indicator = document.getElementById('connection-indicator');
+            const textElement = document.getElementById('connection-text');
+            
+            indicator.className = `status-indicator ${status}`;
+            textElement.textContent = text;
+        }
+
+        function updateWalletUI() {
+            if (currentWallet) {
+                // Show wallet UI
+                document.getElementById('current-wallet').style.display = 'block';
+                document.getElementById('no-wallet').style.display = 'none';
+                document.getElementById('quick-actions').style.display = 'block';
+                document.getElementById('wallet-dashboard').style.display = 'block';
+                document.getElementById('welcome-screen').style.display = 'none';
+
+                // Update wallet info
+                document.getElementById('wallet-name').textContent = currentWallet.name;
+                document.getElementById('wallet-address').innerHTML = 
+                    formatAddress(currentWallet.address) + 
+                    '<button class="copy-button" onclick="copyAddress()">Copy</button>';
+                document.getElementById('receive-address').value = currentWallet.address;
+
+                // Enable send button if connected
+                const sendBtn = document.getElementById('send-btn');
+                sendBtn.disabled = false;
+
+                // Update available balance in send form
+                if (currentBalance) {
+                    document.getElementById('available-balance').textContent = 
+                        currentBalance.balance.toFixed(8);
+                }
+
+                // Refresh balance if connected
+                if (shadowyWeb3.canPerformNetworkOperations()) {
+                    refreshBalance();
+                }
+            } else {
+                // Hide wallet UI
+                document.getElementById('current-wallet').style.display = 'none';
+                document.getElementById('no-wallet').style.display = 'block';
+                document.getElementById('quick-actions').style.display = 'none';
+                document.getElementById('wallet-dashboard').style.display = 'none';
+                document.getElementById('welcome-screen').style.display = 'block';
+
+                document.getElementById('send-btn').disabled = true;
+            }
+        }
+
+        async function refreshBalance() {
+            if (!currentWallet || !shadowyWeb3.canPerformNetworkOperations()) {
+                return;
+            }
+
+            try {
+                const spinner = document.getElementById('refresh-spinner');
+                spinner.style.display = 'inline-block';
+
+                const balance = await shadowyWeb3.getBalance();
+                currentBalance = balance;
+
+                // Update UI
+                const balanceText = balance.balance.toFixed(8);
+                document.getElementById('balance-amount').textContent = balanceText;
+                document.getElementById('dashboard-balance').textContent = balanceText + ' SHADOW';
+                document.getElementById('available-balance').textContent = balanceText;
+
+                // Get UTXOs
+                const utxos = await shadowyWeb3.getUTXOs();
+                document.getElementById('dashboard-utxos').textContent = utxos.length;
+
+                spinner.style.display = 'none';
+            } catch (error) {
+                console.error('Failed to refresh balance:', error);
+                document.getElementById('refresh-spinner').style.display = 'none';
+            }
+        }
+
+        // Wallet management functions
+        function showCreateWallet() {
+            showModal('create-wallet-modal');
+        }
+
+        function showLoadWallet() {
+            const wallets = shadowyWeb3.listWallets();
+            const container = document.getElementById('available-wallets');
+            
+            if (wallets.length === 0) {
+                container.innerHTML = '<div style="text-align: center; padding: 2rem; color: #7f8c8d;">No wallets found</div>';
+            } else {
+                container.innerHTML = wallets.map(name => `
+                    <div class="wallet-list-item" onclick="loadWalletByName('${name}')">
+                        <div class="wallet-list-info">
+                            <div class="wallet-list-name">${name}</div>
+                        </div>
+                    </div>
+                `).join('');
+            }
+            
+            showModal('load-wallet-modal');
+        }
+
+        async function createWallet() {
+            try {
+                const name = document.getElementById('new-wallet-name').value || 'My Wallet';
+                await shadowyWeb3.createWallet({ name });
+            } catch (error) {
+                showAlert(`Failed to create wallet: ${error.message}`, 'error');
+            }
+        }
+
+        async function loadWalletByName(name) {
+            try {
+                await shadowyWeb3.loadWallet(name);
+            } catch (error) {
+                showAlert(`Failed to load wallet: ${error.message}`, 'error');
+            }
+        }
+
+        function lockWallet() {
+            shadowyWeb3.lockWallet();
+            currentWallet = null;
+            currentBalance = null;
+            updateWalletUI();
+        }
+
+        // Transaction functions
+        async function sendTransaction() {
+            try {
+                const to = document.getElementById('send-to-address').value;
+                const amount = parseFloat(document.getElementById('send-amount').value);
+                const fee = parseFloat(document.getElementById('send-fee').value);
+
+                if (!to || !amount) {
+                    showAlert('Please enter recipient address and amount', 'error');
+                    return;
+                }
+
+                if (!(await shadowyWeb3.validateAddress(to))) {
+                    showAlert('Invalid recipient address', 'error');
+                    return;
+                }
+
+                const resultDiv = document.getElementById('send-result');
+                resultDiv.innerHTML = '<div class="alert info">Sending transaction...</div>';
+
+                const result = await shadowyWeb3.sendTransaction({ to, amount, fee });
+
+                if (result.status === 'failed') {
+                    resultDiv.innerHTML = `<div class="alert error">${result.message}</div>`;
+                } else {
+                    resultDiv.innerHTML = `
+                        <div class="alert success">
+                            <strong>Transaction ${result.status}</strong><br>
+                            Hash: ${result.txHash}<br>
+                            ${result.message}
+                        </div>
+                    `;
+                    
+                    // Clear form
+                    document.getElementById('send-to-address').value = '';
+                    document.getElementById('send-amount').value = '';
+                }
+            } catch (error) {
+                document.getElementById('send-result').innerHTML = 
+                    `<div class="alert error">Transaction failed: ${error.message}</div>`;
+            }
+        }
+
+        // Modal functions
+        function showModal(modalId) {
+            document.getElementById(modalId).classList.add('show');
+        }
+
+        function hideModal(modalId) {
+            document.getElementById(modalId).classList.remove('show');
+        }
+
+        // Tab functions
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab').forEach(tab => tab.classList.remove('active'));
+            document.querySelector(`[onclick="switchTab('${tabName}')"]`).classList.add('active');
+
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+        }
+
+        // Utility functions
+        function formatAddress(address) {
+            return address.slice(0, 8) + '...' + address.slice(-8);
+        }
+
+        function copyAddress() {
+            if (currentWallet) {
+                navigator.clipboard.writeText(currentWallet.address);
+                showAlert('Address copied to clipboard!', 'success');
+            }
+        }
+
+        function showAlert(message, type) {
+            // Create alert element
+            const alert = document.createElement('div');
+            alert.className = `alert ${type}`;
+            alert.textContent = message;
+            alert.style.position = 'fixed';
+            alert.style.top = '20px';
+            alert.style.right = '20px';
+            alert.style.zIndex = '10000';
+            alert.style.maxWidth = '400px';
+
+            document.body.appendChild(alert);
+
+            // Remove after 5 seconds
+            setTimeout(() => {
+                document.body.removeChild(alert);
+            }, 5000);
+        }
+
+        function loadSavedSettings() {
+            const settings = shadowyWeb3.loadSettings();
+            if (settings.lastWallet) {
+                // Auto-load last wallet
+                shadowyWeb3.loadWallet(settings.lastWallet).catch(() => {
+                    // Ignore errors - wallet might not exist
+                });
+            }
+        }
+
+        function saveSettings() {
+            shadowyWeb3.saveSettings();
+            showAlert('Settings saved!', 'success');
+        }
+
+        // Placeholder functions for future implementation
+        function showSendModal() { switchTab('send'); }
+        function showReceiveModal() { switchTab('receive'); }
+        function showTransactionHistory() { switchTab('history'); }
+        function showBackupWallet() { showModal('backup-modal'); }
+        function showDeleteWallet() { /* Implementation needed */ }
+        function exportWallet() { /* Implementation needed */ }
+        function copyPrivateKey() { /* Implementation needed */ }
+
+        // Initialize when page loads
+        window.addEventListener('load', initApp);
+
+        // Close modals when clicking outside
+        window.addEventListener('click', (e) => {
+            if (e.target.classList.contains('modal')) {
+                e.target.classList.remove('show');
+            }
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shadowy Web3 Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        
+        .container {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            margin-bottom: 20px;
+        }
+        
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        
+        .section {
+            margin-bottom: 30px;
+        }
+        
+        .section h2 {
+            color: #555;
+            border-bottom: 2px solid #eee;
+            padding-bottom: 10px;
+        }
+        
+        .form-group {
+            margin-bottom: 15px;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #333;
+        }
+        
+        input, select, textarea {
+            width: 100%;
+            padding: 8px 12px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        
+        button {
+            background: #007acc;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        
+        button:hover {
+            background: #005a9e;
+        }
+        
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .status {
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        
+        .status.success {
+            background: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        
+        .status.error {
+            background: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        
+        .status.info {
+            background: #d1ecf1;
+            border: 1px solid #bee5eb;
+            color: #0c5460;
+        }
+        
+        .wallet-info {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 4px;
+            border-left: 4px solid #007acc;
+        }
+        
+        .address {
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            word-break: break-all;
+            background: #f1f1f1;
+            padding: 5px;
+            border-radius: 3px;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #007acc;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        
+        @media (max-width: 600px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <h1>🌙 Shadowy Web3 Demo</h1>
+    
+    <div class="container">
+        <div class="section">
+            <h2>Connection Status</h2>
+            <div id="connection-status" class="status info">
+                <span class="loading"></span> Initializing...
+            </div>
+            <div class="form-group">
+                <label for="node-url">Node URL:</label>
+                <input type="text" id="node-url" value="http://localhost:8080" placeholder="http://localhost:8080">
+            </div>
+            <button onclick="connectToNode()">Connect to Node</button>
+            <button onclick="workOffline()">Work Offline</button>
+        </div>
+    </div>
+    
+    <div class="grid">
+        <div class="container">
+            <div class="section">
+                <h2>Wallet Management</h2>
+                <div id="wallet-status" class="status info">No wallet loaded</div>
+                
+                <div class="form-group">
+                    <label for="wallet-name">Wallet Name:</label>
+                    <input type="text" id="wallet-name" placeholder="my-wallet">
+                </div>
+                
+                <button onclick="createWallet()">Create Wallet</button>
+                <button onclick="loadWallet()">Load Wallet</button>
+                <button onclick="listWallets()">List Wallets</button>
+                <button onclick="lockWallet()">Lock Wallet</button>
+                
+                <div id="wallet-list" style="margin-top: 15px;"></div>
+            </div>
+        </div>
+        
+        <div class="container">
+            <div class="section">
+                <h2>Balance & UTXOs</h2>
+                <div id="balance-info" class="wallet-info" style="display: none;">
+                    <strong>Balance:</strong> <span id="balance-amount">0</span> SHADOW<br>
+                    <strong>Address:</strong> <div id="wallet-address" class="address"></div>
+                    <strong>UTXOs:</strong> <span id="utxo-count">0</span>
+                </div>
+                
+                <button onclick="getBalance()" id="get-balance-btn" disabled>Get Balance</button>
+                <button onclick="getUTXOs()" id="get-utxos-btn" disabled>Get UTXOs</button>
+                
+                <div id="utxo-list" style="margin-top: 15px;"></div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="section">
+            <h2>Send Transaction</h2>
+            <div class="grid">
+                <div>
+                    <div class="form-group">
+                        <label for="send-to">To Address:</label>
+                        <input type="text" id="send-to" placeholder="S...">
+                    </div>
+                    <div class="form-group">
+                        <label for="send-amount">Amount (SHADOW):</label>
+                        <input type="number" id="send-amount" step="0.00000001" min="0">
+                    </div>
+                </div>
+                <div>
+                    <div class="form-group">
+                        <label for="send-fee">Fee (SHADOW):</label>
+                        <input type="number" id="send-fee" value="0.011" step="0.00000001" min="0">
+                    </div>
+                    <button onclick="sendTransaction()" id="send-tx-btn" disabled>Send Transaction</button>
+                </div>
+            </div>
+            
+            <div id="tx-result" style="margin-top: 15px;"></div>
+        </div>
+    </div>
+    
+    <div class="container">
+        <div class="section">
+            <h2>Debug & Logs</h2>
+            <textarea id="debug-log" rows="10" readonly style="font-family: 'Courier New', monospace; font-size: 12px;"></textarea>
+            <button onclick="clearLog()">Clear Log</button>
+        </div>
+    </div>
+
+    <!-- Include Go WASM runtime -->
+    <script src="wasm_exec.js"></script>
+    <!-- Include our compiled ShadowyWeb3 library -->
+    <script src="shadowy-web3.js"></script>
+    
+    <script>
+        // Global ShadowyWeb3 instance
+        let shadowyWeb3;
+        
+        // Debug logging
+        function log(message, type = 'info') {
+            const timestamp = new Date().toLocaleTimeString();
+            const logArea = document.getElementById('debug-log');
+            const logLine = `[${timestamp}] ${type.toUpperCase()}: ${message}\n`;
+            logArea.value += logLine;
+            logArea.scrollTop = logArea.scrollHeight;
+            console.log(`ShadowyWeb3 ${type}:`, message);
+        }
+        
+        function clearLog() {
+            document.getElementById('debug-log').value = '';
+        }
+        
+        function updateStatus(elementId, message, type = 'info') {
+            const element = document.getElementById(elementId);
+            element.className = `status ${type}`;
+            element.innerHTML = message;
+        }
+        
+        // Initialize ShadowyWeb3
+        async function initShadowyWeb3() {
+            try {
+                log('Initializing ShadowyWeb3...');
+                shadowyWeb3 = new ShadowyWeb3.default();
+                
+                // Set up event listeners
+                shadowyWeb3.on('wallet:created', (wallet) => {
+                    log(`Wallet created: ${wallet.name} (${wallet.address})`);
+                    updateWalletInfo(wallet);
+                });
+                
+                shadowyWeb3.on('wallet:loaded', (wallet) => {
+                    log(`Wallet loaded: ${wallet.name} (${wallet.address})`);
+                    updateWalletInfo(wallet);
+                });
+                
+                shadowyWeb3.on('transaction:signed', (result) => {
+                    log(`Transaction signed: ${result.txHash}`);
+                });
+                
+                shadowyWeb3.on('transaction:broadcast', (result) => {
+                    log(`Transaction broadcast: ${result.txHash}`);
+                });
+                
+                shadowyWeb3.on('error', (error) => {
+                    log(`Error: ${error.message}`, 'error');
+                });
+                
+                await shadowyWeb3.initialize();
+                log('ShadowyWeb3 initialized successfully');
+                updateStatus('connection-status', '✅ Initialized - Working Offline', 'success');
+                
+            } catch (error) {
+                log(`Failed to initialize: ${error.message}`, 'error');
+                updateStatus('connection-status', `❌ Failed to initialize: ${error.message}`, 'error');
+            }
+        }
+        
+        function updateWalletInfo(wallet) {
+            document.getElementById('wallet-status').innerHTML = 
+                `✅ Wallet loaded: <strong>${wallet.name}</strong>`;
+            document.getElementById('wallet-status').className = 'status success';
+            
+            document.getElementById('wallet-address').textContent = wallet.address;
+            document.getElementById('balance-info').style.display = 'block';
+            
+            // Enable buttons
+            document.getElementById('get-balance-btn').disabled = !shadowyWeb3.canPerformNetworkOperations();
+            document.getElementById('get-utxos-btn').disabled = !shadowyWeb3.canPerformNetworkOperations();
+            document.getElementById('send-tx-btn').disabled = false;
+        }
+        
+        // Wallet operations
+        async function createWallet() {
+            try {
+                const name = document.getElementById('wallet-name').value || 'demo-wallet';
+                log(`Creating wallet: ${name}`);
+                const wallet = await shadowyWeb3.createWallet({ name });
+                log(`Wallet created successfully: ${wallet.address}`);
+            } catch (error) {
+                log(`Failed to create wallet: ${error.message}`, 'error');
+            }
+        }
+        
+        async function loadWallet() {
+            try {
+                const name = document.getElementById('wallet-name').value;
+                if (!name) {
+                    log('Please enter a wallet name', 'error');
+                    return;
+                }
+                
+                log(`Loading wallet: ${name}`);
+                const wallet = await shadowyWeb3.loadWallet(name);
+                log(`Wallet loaded successfully: ${wallet.address}`);
+            } catch (error) {
+                log(`Failed to load wallet: ${error.message}`, 'error');
+            }
+        }
+        
+        async function listWallets() {
+            try {
+                const wallets = shadowyWeb3.listWallets();
+                const listDiv = document.getElementById('wallet-list');
+                
+                if (wallets.length === 0) {
+                    listDiv.innerHTML = '<em>No wallets found</em>';
+                } else {
+                    listDiv.innerHTML = '<strong>Available wallets:</strong><br>' + 
+                        wallets.map(name => `<span style="font-family: monospace;">${name}</span>`).join('<br>');
+                }
+                
+                log(`Found ${wallets.length} wallets: ${wallets.join(', ')}`);
+            } catch (error) {
+                log(`Failed to list wallets: ${error.message}`, 'error');
+            }
+        }
+        
+        function lockWallet() {
+            shadowyWeb3.lockWallet();
+            document.getElementById('wallet-status').innerHTML = 'No wallet loaded';
+            document.getElementById('wallet-status').className = 'status info';
+            document.getElementById('balance-info').style.display = 'none';
+            
+            // Disable buttons
+            document.getElementById('get-balance-btn').disabled = true;
+            document.getElementById('get-utxos-btn').disabled = true;
+            document.getElementById('send-tx-btn').disabled = true;
+            
+            log('Wallet locked');
+        }
+        
+        // Network operations
+        async function connectToNode() {
+            try {
+                const url = document.getElementById('node-url').value;
+                log(`Connecting to node: ${url}`);
+                
+                shadowyWeb3.connectToNode({ url });
+                const isConnected = await shadowyWeb3.testConnection();
+                
+                if (isConnected) {
+                    updateStatus('connection-status', `✅ Connected to ${url}`, 'success');
+                    log('Connected to node successfully');
+                    
+                    // Enable network buttons if wallet is loaded
+                    if (shadowyWeb3.isWalletUnlocked()) {
+                        document.getElementById('get-balance-btn').disabled = false;
+                        document.getElementById('get-utxos-btn').disabled = false;
+                    }
+                } else {
+                    updateStatus('connection-status', `❌ Failed to connect to ${url}`, 'error');
+                    log('Failed to connect to node', 'error');
+                }
+            } catch (error) {
+                log(`Connection error: ${error.message}`, 'error');
+                updateStatus('connection-status', `❌ Connection error: ${error.message}`, 'error');
+            }
+        }
+        
+        function workOffline() {
+            shadowyWeb3.disconnectFromNode();
+            updateStatus('connection-status', '🔒 Working Offline', 'info');
+            log('Working offline');
+            
+            // Disable network buttons
+            document.getElementById('get-balance-btn').disabled = true;
+            document.getElementById('get-utxos-btn').disabled = true;
+        }
+        
+        async function getBalance() {
+            try {
+                log('Getting balance...');
+                const balance = await shadowyWeb3.getBalance();
+                
+                document.getElementById('balance-amount').textContent = balance.balance.toFixed(8);
+                document.getElementById('utxo-count').textContent = 'Loading...';
+                
+                log(`Balance: ${balance.balance} SHADOW (${balance.transactionCount} transactions)`);
+            } catch (error) {
+                log(`Failed to get balance: ${error.message}`, 'error');
+            }
+        }
+        
+        async function getUTXOs() {
+            try {
+                log('Getting UTXOs...');
+                const utxos = await shadowyWeb3.getUTXOs();
+                
+                document.getElementById('utxo-count').textContent = utxos.length;
+                
+                const listDiv = document.getElementById('utxo-list');
+                if (utxos.length === 0) {
+                    listDiv.innerHTML = '<em>No UTXOs found</em>';
+                } else {
+                    listDiv.innerHTML = `<strong>UTXOs (${utxos.length}):</strong><br>` +
+                        utxos.map(utxo => 
+                            `<div style="font-family: monospace; font-size: 12px; margin: 5px 0; padding: 5px; background: #f8f9fa;">
+                                ${utxo.txid}:${utxo.vout} - ${(utxo.value / 100000000).toFixed(8)} SHADOW
+                            </div>`
+                        ).join('');
+                }
+                
+                log(`Found ${utxos.length} UTXOs`);
+            } catch (error) {
+                log(`Failed to get UTXOs: ${error.message}`, 'error');
+            }
+        }
+        
+        async function sendTransaction() {
+            try {
+                const to = document.getElementById('send-to').value;
+                const amount = parseFloat(document.getElementById('send-amount').value);
+                const fee = parseFloat(document.getElementById('send-fee').value);
+                
+                if (!to || !amount) {
+                    log('Please enter recipient address and amount', 'error');
+                    return;
+                }
+                
+                log(`Sending ${amount} SHADOW to ${to} (fee: ${fee})`);
+                
+                const result = await shadowyWeb3.sendTransaction({
+                    to,
+                    amount,
+                    fee
+                });
+                
+                const resultDiv = document.getElementById('tx-result');
+                resultDiv.innerHTML = `
+                    <div class="status ${result.status === 'failed' ? 'error' : 'success'}">
+                        <strong>Status:</strong> ${result.status}<br>
+                        <strong>Message:</strong> ${result.message}<br>
+                        ${result.txHash ? `<strong>TX Hash:</strong> <span class="address">${result.txHash}</span>` : ''}
+                    </div>
+                `;
+                
+                log(`Transaction result: ${result.status} - ${result.message}`);
+            } catch (error) {
+                log(`Failed to send transaction: ${error.message}`, 'error');
+            }
+        }
+        
+        // Initialize when page loads
+        window.addEventListener('load', initShadowyWeb3);
+    </script>
+</body>
+</html>
