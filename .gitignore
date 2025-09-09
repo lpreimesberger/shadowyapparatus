@@ -21,6 +21,8 @@ tmp
 *.wasm
 dist
 node_modules
+venv
+explorer_data
 
 
 

@@ -62,8 +62,7 @@ module.exports = {
     hot: true,
     historyApiFallback: false,
     headers: {
-      'Cross-Origin-Embedder-Policy': 'require-corp',
-      'Cross-Origin-Opener-Policy': 'same-origin'
+      // Remove COOP/COEP headers that can cause issues with local development
     }
   },
   experiments: {

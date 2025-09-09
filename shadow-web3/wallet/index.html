@@ -525,7 +525,7 @@
                     </select>
                 </div>
                 <div class="form-group" id="custom-node-group" style="display: none;">
-                    <input type="text" id="custom-node-url" placeholder="http://localhost:8080">
+                    <input type="text" id="custom-node-url" placeholder="http://192.168.68.90:8080">
                     <button class="btn small" onclick="connectToCustomNode()">Connect</button>
                 </div>
             </div>
@@ -685,7 +685,7 @@
                     <h3>Network Settings</h3>
                     <div class="form-group">
                         <label>Default Node URL</label>
-                        <input type="text" id="default-node" value="http://localhost:8080">
+                        <input type="text" id="default-node" value="">
                     </div>
                     <button class="btn" onclick="saveSettings()">Save Settings</button>
                 </div>
@@ -757,9 +757,9 @@
     </div>
 
     <!-- Include Go WASM runtime -->
-    <script src="../demo/wasm_exec.js"></script>
+    <script src="wasm_exec.js"></script>
     <!-- Include our compiled ShadowyWeb3 library -->
-    <script src="../dist/shadowy-web3.js"></script>
+    <script src="shadowy-web3.js"></script>
     
     <script>
         // Global state
@@ -864,7 +864,7 @@
 
         async function connectToLocalNode() {
             try {
-                shadowyWeb3.connectToNode({ url: 'http://localhost:8080' });
+                shadowyWeb3.connectToNode({ url: '' }); // Use relative URLs - proxy handles routing
                 const isConnected = await shadowyWeb3.testConnection();
                 
                 if (isConnected) {
