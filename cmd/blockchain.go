@@ -6,9 +6,7 @@ import (
     "encoding/hex"
     "encoding/json"
     "fmt"
-    "io"
     "log"
-    "net/http"
     "os"
     "path/filepath"
     "sort"
@@ -20,8 +18,6 @@ import (
 var (
     // AllowFork when true, allows creating new testnet genesis blocks instead of bootstrapping
     AllowFork = false
-    // TrackerURL is the URL of the tracker service for bootstrapping
-    TrackerURL = "https://playatarot.com"
 )
 
 // Block represents a single block in the blockchain
@@ -157,41 +153,6 @@ func (bc *Blockchain) SetBroadcaster(broadcaster BlockBroadcaster) {
     bc.broadcaster = broadcaster
 }
 
-// bootstrapGenesisFromTracker fetches genesis block from the tracker service
-func (bc *Blockchain) bootstrapGenesisFromTracker() (*GenesisBlock, error) {
-    url := TrackerURL + "/v1/sxe"
-    fmt.Printf("🌐 Bootstrapping genesis block from tracker: %s\n", url)
-
-    // Make HTTP request to tracker
-    resp, err := http.Get(url)
-    if err != nil {
-        return nil, fmt.Errorf("failed to fetch genesis from tracker: %w", err)
-    }
-    defer resp.Body.Close()
-
-    if resp.StatusCode != http.StatusOK {
-        return nil, fmt.Errorf("tracker returned non-200 status: %d", resp.StatusCode)
-    }
-
-    // Read response body
-    body, err := io.ReadAll(resp.Body)
-    if err != nil {
-        return nil, fmt.Errorf("failed to read response body: %w", err)
-    }
-
-    // Parse genesis block
-    var genesis GenesisBlock
-    if err := json.Unmarshal(body, &genesis); err != nil {
-        return nil, fmt.Errorf("failed to parse genesis block from tracker: %w", err)
-    }
-
-    fmt.Printf("✅ Successfully bootstrapped genesis block from tracker\n")
-    fmt.Printf("   Network ID: %s\n", genesis.NetworkID)
-    fmt.Printf("   Genesis Hash: %s\n", genesis.Hash()[:16]+"...")
-    fmt.Printf("   Initial Supply: %d satoshis\n", genesis.InitialSupply)
-
-    return &genesis, nil
-}
 
 // initialize loads the blockchain from disk or creates genesis block
 func (bc *Blockchain) initialize() error {
@@ -209,14 +170,13 @@ func (bc *Blockchain) initialize() error {
                 return fmt.Errorf("failed to create genesis block: %w", err)
             }
         } else {
-            // Bootstrap genesis block from tracker
-            fmt.Printf("🚀 No local genesis.json found, bootstrapping from network...\n")
-            genesis, err = bc.bootstrapGenesisFromTracker()
-            if err != nil {
-                fmt.Printf("❌ Failed to bootstrap from tracker: %v\n", err)
-                fmt.Printf("💡 Use --fork flag to create a new testnet instead\n")
-                return fmt.Errorf("failed to bootstrap genesis block: %w", err)
-            }
+            // No genesis found and fork not allowed
+            fmt.Printf("❌ No local genesis.json found in %s/genesis.json\n", bc.dataDir)
+            fmt.Printf("💡 Options:\n")
+            fmt.Printf("   1. Use --fork flag to create a new testnet\n")
+            fmt.Printf("   2. Use ./shadowy-tendermint tendermint bootstrap to setup from bootstrap package\n")
+            fmt.Printf("   3. Copy genesis.json from an existing node to %s/genesis.json\n", bc.dataDir)
+            return fmt.Errorf("no genesis block found and --fork not enabled")
         }
 
         // Add genesis to chain

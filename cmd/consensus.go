@@ -1,3 +1,7 @@
+// DEPRECATED: This file contains the old custom consensus engine
+// All consensus functionality has been migrated to Tendermint BFT
+// This file is kept for reference but should not be used in production
+// Use 'shadowy tendermint' for the new consensus system
 package cmd
 
 import (
@@ -30,8 +34,6 @@ type ConsensusEngine struct {
     peers      map[string]*Peer
     peersMutex sync.RWMutex
 
-    // Tracker integration
-    tracker *TrackerClient
 
     // Consensus state
     bestChain   *ChainState
@@ -68,7 +70,6 @@ type ConsensusEngine struct {
 type ConsensusConfig struct {
     NodeID                  string        `json:"node_id"`
     ListenAddr              string        `json:"listen_addr"`
-    TrackerURL              string        `json:"tracker_url"`
     MaxPeers                int           `json:"max_peers"`
     SyncTimeout             time.Duration `json:"sync_timeout"`
     HeartbeatInterval       time.Duration `json:"heartbeat_interval"`
@@ -80,7 +81,6 @@ func DefaultConsensusConfig() *ConsensusConfig {
     return &ConsensusConfig{
         NodeID:                  generateNodeID(),
         ListenAddr:              "0.0.0.0:8888",
-        TrackerURL:              "https://playatarot.com", // Default tracker service
         MaxPeers:                50,
         SyncTimeout:             30 * time.Second,
         HeartbeatInterval:       10 * time.Second,
@@ -193,18 +193,7 @@ func NewConsensusEngine(config *ConsensusConfig, blockchain *Blockchain, mempool
         failedConnections: make(map[string]time.Time),
     }
 
-    // Initialize tracker client if tracker URL is configured
-    if config.TrackerURL != "" {
-        // Get mining address for tracker registration
-        miningAddr := ""
-        if miner != nil {
-            miningAddr = miner.minerAddress
-        }
-        log.Printf("🔗 Initializing tracker client with URL: %s", config.TrackerURL)
-        engine.tracker = NewTrackerClient(config.TrackerURL, config.NodeID, miningAddr, "")
-    } else {
-        log.Printf("⚠️ No tracker URL configured, skipping tracker client initialization")
-    }
+    // Tracker functionality removed - deprecated with Tendermint migration
 
     // Initialize best chain state
     tip, err := blockchain.GetTip()
@@ -449,18 +438,7 @@ func (ce *ConsensusEngine) Start() error {
     ce.wg.Add(1)
     go ce.networkServer()
 
-    // Register with tracker service if configured
-    if ce.tracker != nil {
-        go ce.registerWithTracker()
-
-        // Start tracker heartbeat loop
-        ce.wg.Add(1)
-        go ce.trackerHeartbeatLoop()
-
-        // Start tracker peer discovery
-        ce.wg.Add(1)
-        go ce.trackerPeerDiscovery()
-    }
+    // Tracker service removed - deprecated with Tendermint migration
 
     log.Printf("Consensus engine started with Node ID: %s", ce.nodeID)
     ce.SyncFirst()
@@ -1011,18 +989,16 @@ func (ce *ConsensusEngine) receiveMessage(conn net.Conn) (*P2PMessage, error) {
     return &message, nil
 }
 
-// registerWithTracker registers this node with the tracker service
+// registerWithTracker - DEPRECATED: tracker functionality removed
 func (ce *ConsensusEngine) registerWithTracker() {
-    if ce.tracker == nil {
-        return
-    }
+    // No-op: tracker functionality deprecated with Tendermint migration
 
     log.Printf("🔗 Registering with tracker service...")
 
     // Wait a bit for blockchain to initialize
     time.Sleep(2 * time.Second)
 
-    if err := ce.tracker.RegisterWithTracker(ce, ce.blockchain, ce.farming); err != nil {
+    if err := (*TrackerClient)(nil).RegisterWithTracker(ce, ce.blockchain, ce.farming); err != nil {
         log.Fatalln(" Failed to register with tracker: " + err.Error())
     }
 }
@@ -1031,7 +1007,7 @@ func (ce *ConsensusEngine) registerWithTracker() {
 func (ce *ConsensusEngine) trackerHeartbeatLoop() {
     defer ce.wg.Done()
 
-    if ce.tracker == nil {
+    if (*TrackerClient)(nil) == nil {
         return
     }
 
@@ -1051,7 +1027,7 @@ func (ce *ConsensusEngine) trackerHeartbeatLoop() {
             }
             ce.statusMutex.RUnlock()
 
-            if err := ce.tracker.SendHeartbeat(ce.blockchain, ce.farming, status); err != nil {
+            if err := (*TrackerClient)(nil).SendHeartbeat(ce.blockchain, ce.farming, status); err != nil {
                 log.Printf("⚠️ Failed to send heartbeat to tracker: %v", err)
             }
         }
@@ -1062,7 +1038,7 @@ func (ce *ConsensusEngine) trackerHeartbeatLoop() {
 func (ce *ConsensusEngine) trackerPeerDiscovery() {
     defer ce.wg.Done()
 
-    if ce.tracker == nil {
+    if (*TrackerClient)(nil) == nil {
         return
     }
 
@@ -1097,7 +1073,7 @@ func (ce *ConsensusEngine) discoverPeersFromTracker() {
     }
 
     // Transform chainID to tracker format
-    peers, err := ce.tracker.DiscoverPeers(chainID)
+    peers, err := (*TrackerClient)(nil).DiscoverPeers(chainID)
     if err != nil {
         log.Printf("⚠️ Failed to discover peers from tracker: %v", err)
         return

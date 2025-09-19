@@ -356,7 +356,7 @@ func loadConfig() (*ShadowConfig, error) {
 			LogLevel:           "info",
 			LoggingDirectory:   filepath.Join(getWalletDir(), "logs"),
 			ScratchDirectory:   filepath.Join(getWalletDir(), "scratch"),
-			BlockchainDirectory: "./blockchain",
+			BlockchainDirectory: "./data",
 			Version:            1,
 			CreatedAt:          getCurrentTimestamp(),
 			UpdatedAt:          getCurrentTimestamp(),
@@ -387,7 +387,7 @@ func loadConfig() (*ShadowConfig, error) {
 	
 	// Handle compatibility for configs without blockchain_directory
 	if config.BlockchainDirectory == "" {
-		config.BlockchainDirectory = "./blockchain"
+		config.BlockchainDirectory = "./data"
 		// Auto-save the updated config to include the new field
 		config.UpdatedAt = getCurrentTimestamp()
 		if err := saveConfig(&config); err != nil {

@@ -1,3 +1,4 @@
+// DEPRECATED: Old custom consensus - replaced by Tendermint
 package cmd
 
 import (

@@ -621,7 +621,7 @@ func defaultShadowConfig() *ShadowConfig {
 		LogLevel:           "info",
 		LoggingDirectory:   "./logs",
 		ScratchDirectory:   "./scratch",
-		BlockchainDirectory: "./blockchain",
+		BlockchainDirectory: "./data",
 		Version:            1,
 	}
 }
@@ -677,106 +677,30 @@ func allocateNodePorts(preferredHTTP, preferredGRPC, preferredP2P int) (httpPort
 	return httpPort, grpcPort, p2pPort, nil
 }
 
-// Node CLI command
+// Node CLI command - DEPRECATED: Redirects to Tendermint
 var nodeCmd = &cobra.Command{
 	Use:   "node",
-	Short: "Start the Shadowy blockchain node",
-	Long:  "Starts the complete Shadowy blockchain node with all services (mempool, timelord, HTTP API, gRPC)",
+	Short: "[DEPRECATED] Start the Shadowy blockchain node - use 'tendermint' instead",
+	Long: `[DEPRECATED] This command has been replaced by 'tendermint' for better consensus.
+
+The old custom consensus system has been replaced by battle-tested Tendermint BFT consensus.
+All existing functionality is preserved while providing better reliability and network stability.
+
+MIGRATION:
+  Old: ./shadowy node
+  New: ./shadowy tendermint
+
+Use 'shadowy tendermint --help' for the new options.
+Use 'shadowy tendermint network-setup' for network configuration help.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		// Load configuration
-		config := DefaultNodeConfig()
+		// Show deprecation warning and redirect to tendermint
+		log.Printf("⚠️  DEPRECATED: 'node' command is deprecated")
+		log.Printf("🔄 Redirecting to Tendermint consensus...")
+		log.Printf("💡 Use './shadowy tendermint' directly in the future")
+		log.Printf("")
 		
-		// Override with command line flags
-		if httpPort, _ := cmd.Flags().GetInt("http-port"); httpPort != 0 {
-			config.HTTPPort = httpPort
-		}
-		if grpcPort, _ := cmd.Flags().GetInt("grpc-port"); grpcPort != 0 {
-			config.GRPCPort = grpcPort
-		}
-		if miningAddr, _ := cmd.Flags().GetString("mining-address"); miningAddr != "" {
-			config.MiningAddress = miningAddr
-		}
-		if enableTimelord, _ := cmd.Flags().GetBool("enable-timelord"); enableTimelord {
-			config.EnableTimelord = true
-		}
-		if disableConsensus, _ := cmd.Flags().GetBool("disable-consensus"); disableConsensus {
-			config.EnableConsensus = false
-		}
-		if consensusPort, _ := cmd.Flags().GetString("consensus-port"); consensusPort != "" {
-			config.ConsensusConfig.ListenAddr = "0.0.0.0:" + consensusPort
-		}
-		if devMode, _ := cmd.Flags().GetBool("dev-mode"); devMode {
-			config.ShadowConfig.DevMode = true
-			log.Printf("🚀 Development mode enabled - fast block mining activated!")
-		}
-		
-		// Set tracker URL from global flag
-		config.ConsensusConfig.TrackerURL = TrackerURL
-		
-		// Allocate available ports if not explicitly set
-		preferredHTTP := config.HTTPPort
-		preferredGRPC := config.GRPCPort
-		preferredP2P := 8888 // Extract P2P port from consensus config
-		
-		// Extract current P2P port from ListenAddr if set
-		if config.ConsensusConfig != nil && config.ConsensusConfig.ListenAddr != "" {
-			if _, portStr, err := net.SplitHostPort(config.ConsensusConfig.ListenAddr); err == nil {
-				if port, err := net.LookupPort("tcp", portStr); err == nil && port > 0 {
-					preferredP2P = port
-				}
-			}
-		}
-		
-		// Only allocate ports dynamically if not explicitly set via flags
-		httpPortChanged := cmd.Flags().Changed("http-port")
-		grpcPortChanged := cmd.Flags().Changed("grpc-port") 
-		consensusPortChanged := cmd.Flags().Changed("consensus-port")
-		
-		if !httpPortChanged || !grpcPortChanged || !consensusPortChanged {
-			httpPort, grpcPort, p2pPort, err := allocateNodePorts(preferredHTTP, preferredGRPC, preferredP2P)
-			if err != nil {
-				fmt.Printf("Error allocating ports: %v\n", err)
-				os.Exit(1)
-			}
-			
-			// Update config with allocated ports
-			if !httpPortChanged {
-				config.HTTPPort = httpPort
-				if httpPort != preferredHTTP {
-					log.Printf("📡 HTTP server using port %d (preferred %d was unavailable)", httpPort, preferredHTTP)
-				}
-			}
-			if !grpcPortChanged {
-				config.GRPCPort = grpcPort
-				if grpcPort != preferredGRPC {
-					log.Printf("📡 gRPC server using port %d (preferred %d was unavailable)", grpcPort, preferredGRPC)
-				}
-			}
-			if !consensusPortChanged {
-				config.ConsensusConfig.ListenAddr = fmt.Sprintf("0.0.0.0:%d", p2pPort)
-				config.ShadowConfig.ListenOn = fmt.Sprintf("0.0.0.0:%d", p2pPort)
-				if p2pPort != preferredP2P {
-					log.Printf("📡 P2P consensus using port %d (preferred %d was unavailable)", p2pPort, preferredP2P)
-				}
-			}
-		}
-		
-		// Create and start node
-		node, err := NewShadowNode(config)
-		if err != nil {
-			fmt.Printf("Error creating node: %v\n", err)
-			os.Exit(1)
-		}
-		
-		if err := node.Start(); err != nil {
-			fmt.Printf("Error starting node: %v\n", err)
-			os.Exit(1)
-		}
-		
-		// Wait for shutdown
-		<-node.ctx.Done()
-		
-		log.Printf("Node shutdown complete")
+		// Call the tendermint command with the same args
+		tendermintCmd.Run(cmd, args)
 	},
 }
 
@@ -802,15 +726,6 @@ func hasWalletForAddress(address string) bool {
 
 func init() {
 	rootCmd.AddCommand(nodeCmd)
-
-	nodeCmd.Flags().Int("http-port", 8080, "HTTP API server port")
-	nodeCmd.Flags().Int("grpc-port", 9090, "gRPC server port")
-	nodeCmd.Flags().String("mining-address", "", "Specific mining address to use (if not set, uses default wallet)")
-	nodeCmd.Flags().Bool("enable-timelord", false, "Enable timelord VDF service")
-	nodeCmd.Flags().Bool("disable-http", false, "Disable HTTP API server")
-	nodeCmd.Flags().Bool("disable-grpc", false, "Disable gRPC server")
-	nodeCmd.Flags().Bool("disable-consensus", false, "Disable consensus engine")
-	nodeCmd.Flags().String("consensus-port", "8888", "Consensus P2P port")
-	nodeCmd.Flags().Bool("farming-only", false, "Run in farming-only mode")
-	nodeCmd.Flags().Bool("dev-mode", false, "Enable development mode (fast 30s block times for testing)")
+	// Note: No flags needed - node command just redirects to tendermint
+	// All configuration now handled by tendermint command flags
 }

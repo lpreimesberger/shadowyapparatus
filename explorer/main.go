@@ -51,10 +51,13 @@ func (es *ExplorerServer) Start() error {
     api.HandleFunc("/pools", es.handlePoolsAPI).Methods("GET")
     api.HandleFunc("/pool/{poolId}", es.handlePoolDetailsAPI).Methods("GET")
     api.HandleFunc("/storage", es.handleStorageAPI).Methods("GET")
+    api.HandleFunc("/wallets", es.handleWalletsAPI).Methods("GET")
     api.HandleFunc("/admin/reset", es.handleReset).Methods("POST")
     api.HandleFunc("/admin/test-token", es.handleTestToken).Methods("POST")
     api.HandleFunc("/admin/test-pool", es.handleTestPool).Methods("POST")
     api.HandleFunc("/admin/debug-db", es.handleDebugDB).Methods("GET")
+    api.HandleFunc("/admin/debug-tx/{txHash}", es.handleDebugTransaction).Methods("GET")
+    api.HandleFunc("/admin/debug-wallet/{address}", es.handleDebugWallet).Methods("GET")
 
     // Web routes
     router.HandleFunc("/", es.handleHome).Methods("GET")
@@ -66,6 +69,7 @@ func (es *ExplorerServer) Start() error {
     router.HandleFunc("/pools", es.handlePoolsPage).Methods("GET")
     router.HandleFunc("/pool/{poolId}", es.handlePoolDetailsPage).Methods("GET")
     router.HandleFunc("/storage", es.handleStoragePage).Methods("GET")
+    router.HandleFunc("/wallets", es.handleWalletsPage).Methods("GET")
 
     log.Printf("🌐 Shadowy Explorer starting on http://localhost:10001")
     log.Printf("📡 Connecting to Shadowy node at %s", es.shadowyNodeURL)
@@ -298,6 +302,12 @@ func (es *ExplorerServer) handleHome(w http.ResponseWriter, r *http.Request) {
                 <div class="feature-icon">🪙</div>
                 <div class="feature-title"><a href="/tokens" style="color: #64b5f6; text-decoration: none;">Token System</a></div>
                 <div class="feature-desc">Native token creation and management</div>
+            </div>
+
+            <div class="feature">
+                <div class="feature-icon">💰</div>
+                <div class="feature-title"><a href="/wallets" style="color: #64b5f6; text-decoration: none;">Wallet Explorer</a></div>
+                <div class="feature-desc">Browse wallets with SHADOW and token balances</div>
             </div>
 
             <div class="feature">
@@ -1052,6 +1062,7 @@ func (es *ExplorerServer) handleDebugDB(w http.ResponseWriter, r *http.Request) 
     
     // Filter and categorize keys
     var tokenKeys, tokenTimeKeys, tokenTickerKeys, tokenNameKeys []string
+    var txKeys, addrTxKeys, blockKeys []string
     for _, key := range keys {
         if strings.HasPrefix(key, "token:") {
             tokenKeys = append(tokenKeys, key)
@@ -1061,6 +1072,12 @@ func (es *ExplorerServer) handleDebugDB(w http.ResponseWriter, r *http.Request) 
             tokenTickerKeys = append(tokenTickerKeys, key)
         } else if strings.HasPrefix(key, "token_name:") {
             tokenNameKeys = append(tokenNameKeys, key)
+        } else if strings.HasPrefix(key, "tx:") {
+            txKeys = append(txKeys, key)
+        } else if strings.HasPrefix(key, "addr_tx:") {
+            addrTxKeys = append(addrTxKeys, key)
+        } else if strings.HasPrefix(key, "block:") || strings.HasPrefix(key, "height:") {
+            blockKeys = append(blockKeys, key)
         }
     }
     
@@ -1070,11 +1087,354 @@ func (es *ExplorerServer) handleDebugDB(w http.ResponseWriter, r *http.Request) 
         "token_time_keys":   tokenTimeKeys,
         "token_ticker_keys": tokenTickerKeys,
         "token_name_keys":   tokenNameKeys,
+        "tx_keys":           txKeys[:min(10, len(txKeys))],
+        "addr_tx_keys":      addrTxKeys[:min(10, len(addrTxKeys))],
+        "block_keys":        blockKeys[:min(10, len(blockKeys))],
+        "tx_keys_count":     len(txKeys),
+        "addr_tx_keys_count": len(addrTxKeys),
+        "block_keys_count":  len(blockKeys),
         "sample_keys":       keys[:min(10, len(keys))],
     }
     
     w.Header().Set("Content-Type", "application/json")
     json.NewEncoder(w).Encode(response)
+}
+
+// Wallets API endpoint
+func (es *ExplorerServer) handleWalletsAPI(w http.ResponseWriter, r *http.Request) {
+    // Parse pagination parameters
+    page := 1
+    perPage := 20
+
+    if p := r.URL.Query().Get("page"); p != "" {
+        if parsed, err := strconv.Atoi(p); err == nil && parsed > 0 {
+            page = parsed
+        }
+    }
+
+    if pp := r.URL.Query().Get("per_page"); pp != "" {
+        if parsed, err := strconv.Atoi(pp); err == nil && parsed > 0 && parsed <= 100 {
+            perPage = parsed
+        }
+    }
+
+    offset := (page - 1) * perPage
+
+    // Get wallets from database
+    wallets, totalWallets, err := es.database.GetAllWallets(perPage, offset)
+    if err != nil {
+        log.Printf("❌ Failed to get wallets: %v", err)
+        http.Error(w, "Failed to get wallets", http.StatusInternalServerError)
+        return
+    }
+
+    totalPages := int((totalWallets + int64(perPage) - 1) / int64(perPage))
+
+    response := PaginatedWallets{
+        Wallets:      wallets,
+        CurrentPage:  page,
+        TotalPages:   totalPages,
+        TotalWallets: totalWallets,
+        PerPage:      perPage,
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(response)
+}
+
+// Debug transaction endpoint
+func (es *ExplorerServer) handleDebugTransaction(w http.ResponseWriter, r *http.Request) {
+    vars := mux.Vars(r)
+    txHash := vars["txHash"]
+
+    log.Printf("🔍 Debugging transaction: %s", txHash)
+
+    var txData map[string]interface{}
+    err := es.database.db.View(func(txn *badger.Txn) error {
+        // Check for tx key
+        txKey := fmt.Sprintf("tx:%s", txHash)
+        item, err := txn.Get([]byte(txKey))
+        if err != nil {
+            log.Printf("❌ Failed to find tx key %s: %v", txKey, err)
+            return err
+        }
+
+        return item.Value(func(val []byte) error {
+            var walletTx WalletTransaction
+            if err := json.Unmarshal(val, &walletTx); err != nil {
+                log.Printf("❌ Failed to unmarshal tx data: %v", err)
+                return err
+            }
+
+            txData = map[string]interface{}{
+                "tx_hash": walletTx.TxHash,
+                "block_hash": walletTx.BlockHash,
+                "block_height": walletTx.BlockHeight,
+                "timestamp": walletTx.Timestamp,
+                "type": walletTx.Type,
+                "amount": walletTx.Amount,
+                "fee": walletTx.Fee,
+                "from_address": walletTx.FromAddress,
+                "to_address": walletTx.ToAddress,
+                "token_symbol": walletTx.TokenSymbol,
+                "token_amount": walletTx.TokenAmount,
+            }
+
+            log.Printf("✅ Found transaction data: %+v", txData)
+            return nil
+        })
+    })
+
+    if err != nil {
+        log.Printf("❌ Failed to debug transaction: %v", err)
+        http.Error(w, fmt.Sprintf("Failed to find transaction: %v", err), http.StatusNotFound)
+        return
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(txData)
+}
+
+// Debug wallet endpoint to test transaction retrieval
+func (es *ExplorerServer) handleDebugWallet(w http.ResponseWriter, r *http.Request) {
+    vars := mux.Vars(r)
+    address := vars["address"]
+
+    log.Printf("🔍 Debug Wallet: Testing transaction retrieval for %s", address)
+
+    // Test manual key search first
+    var foundKeys []string
+    err2 := es.database.db.View(func(txn *badger.Txn) error {
+        opts := badger.DefaultIteratorOptions
+        opts.PrefetchValues = false
+        it := txn.NewIterator(opts)
+        defer it.Close()
+
+        targetPrefix := fmt.Sprintf("addr_tx:%s:", address)
+        log.Printf("🔍 Manual Search: Looking for keys starting with '%s'", targetPrefix)
+
+        count := 0
+        for it.Rewind(); it.Valid(); it.Next() {
+            key := string(it.Item().Key())
+            if strings.HasPrefix(key, "addr_tx:") {
+                count++
+                if strings.Contains(key, address) {
+                    foundKeys = append(foundKeys, key)
+                    if len(foundKeys) <= 5 {
+                        log.Printf("🔍 Manual Search: Found matching key: %s", key)
+                    }
+                }
+                if count <= 10 {
+                    log.Printf("🔍 Manual Search: Sample addr_tx key: %s", key)
+                }
+            }
+        }
+        log.Printf("🔍 Manual Search: Total addr_tx keys scanned: %d, matching address: %d", count, len(foundKeys))
+        return nil
+    })
+
+    // Test GetWalletTransactions directly
+    transactions, err := es.database.GetWalletTransactions(address, 10)
+    if err != nil {
+        log.Printf("❌ Debug Wallet: Error getting transactions: %v", err)
+    }
+
+    log.Printf("🔍 Debug Wallet: Retrieved %d transactions", len(transactions))
+
+    debugInfo := map[string]interface{}{
+        "address": address,
+        "manual_search_error": nil,
+        "manual_keys_found": len(foundKeys),
+        "sample_keys": foundKeys[:min(5, len(foundKeys))],
+        "transactions_found": len(transactions),
+        "transactions": transactions,
+        "error": nil,
+    }
+
+    if err2 != nil {
+        debugInfo["manual_search_error"] = err2.Error()
+    }
+
+    if err != nil {
+        debugInfo["error"] = err.Error()
+    }
+
+    // Also test wallet summary
+    summary, summaryErr := es.database.GetWalletSummary(address)
+    if summaryErr != nil {
+        log.Printf("❌ Debug Wallet: Error getting wallet summary: %v", summaryErr)
+        debugInfo["summary_error"] = summaryErr.Error()
+    } else {
+        debugInfo["summary"] = summary
+        log.Printf("🔍 Debug Wallet: Wallet summary - Balance: %d, TxCount: %d, BlocksMined: %d",
+            summary.Balance, summary.TransactionCount, summary.BlocksMined)
+    }
+
+    w.Header().Set("Content-Type", "application/json")
+    json.NewEncoder(w).Encode(debugInfo)
+}
+
+// Wallets page handler
+func (es *ExplorerServer) handleWalletsPage(w http.ResponseWriter, r *http.Request) {
+    tmpl := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Wallets - Shadowy Explorer</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; text-align: center; margin-bottom: 30px; }
+        .nav { margin-bottom: 20px; }
+        .nav a { margin-right: 20px; text-decoration: none; color: #007bff; }
+        .nav a:hover { text-decoration: underline; }
+        .wallets-table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        .wallets-table th, .wallets-table td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        .wallets-table th { background-color: #f8f9fa; font-weight: bold; }
+        .wallets-table tr:hover { background-color: #f8f9fa; }
+        .address { font-family: monospace; font-size: 12px; }
+        .balance { text-align: right; font-weight: bold; }
+        .token-list { font-size: 11px; color: #666; max-width: 200px; }
+        .token-item { margin: 2px 0; padding: 2px 6px; background: #e3f2fd; border-radius: 3px; display: inline-block; margin-right: 4px; }
+        .loading { text-align: center; padding: 40px; color: #666; }
+        .error { color: #dc3545; text-align: center; padding: 20px; }
+        .pagination { text-align: center; margin-top: 20px; }
+        .pagination a { margin: 0 5px; padding: 8px 12px; text-decoration: none; border: 1px solid #ddd; border-radius: 4px; color: #007bff; }
+        .pagination a.current { background: #007bff; color: white; }
+        .stats { margin-bottom: 20px; padding: 15px; background: #e8f4fd; border-radius: 5px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>💰 Shadowy Wallets</h1>
+
+        <div class="nav">
+            <a href="/">🏠 Home</a>
+            <a href="/blocks">📦 Blocks</a>
+            <a href="/tokens">🪙 Tokens</a>
+            <a href="/pools">🏊 Pools</a>
+            <a href="/wallets">💰 Wallets</a>
+        </div>
+
+        <div class="stats">
+            <p><strong>Total Wallets:</strong> <span id="totalWallets">Loading...</span></p>
+        </div>
+
+        <div id="walletsContent" class="loading">Loading wallets...</div>
+
+        <div id="pagination" class="pagination"></div>
+    </div>
+
+    <script>
+        let currentPage = 1;
+        const perPage = 20;
+
+        function formatBalance(balance) {
+            return (balance / 100000000).toFixed(8) + ' SHADOW';
+        }
+
+        function formatTokenBalance(tokenBalance) {
+            const decimals = tokenBalance.decimals || 0;
+            const divisor = Math.pow(10, decimals);
+            return (tokenBalance.balance / divisor).toFixed(decimals) + ' ' + tokenBalance.token_ticker;
+        }
+
+        function formatAddress(address) {
+            return address.substring(0, 8) + '...' + address.substring(address.length - 8);
+        }
+
+        function loadWallets(page = 1) {
+            document.getElementById('walletsContent').innerHTML = '<div class="loading">Loading wallets...</div>';
+
+            fetch('/api/v1/wallets?page=' + page + '&per_page=' + perPage)
+                .then(response => response.json())
+                .then(data => {
+                    displayWallets(data);
+                    updatePagination(data);
+                    document.getElementById('totalWallets').textContent = data.total_wallets;
+                })
+                .catch(error => {
+                    document.getElementById('walletsContent').innerHTML = '<div class="error">Failed to load wallets: ' + error + '</div>';
+                });
+        }
+
+        function displayWallets(data) {
+            const container = document.getElementById('walletsContent');
+
+            if (data.wallets.length === 0) {
+                container.innerHTML = '<p style="text-align: center; color: #666;">No wallets found.</p>';
+                return;
+            }
+
+            let html = '<table class="wallets-table">';
+            html += '<thead><tr>';
+            html += '<th>Address</th>';
+            html += '<th>SHADOW Balance</th>';
+            html += '<th>Transactions</th>';
+            html += '<th>Blocks Mined</th>';
+            html += '<th>Token Balances</th>';
+            html += '<th>Last Activity</th>';
+            html += '</tr></thead>';
+            html += '<tbody>';
+
+            data.wallets.forEach(wallet => {
+                html += '<tr>';
+                html += '<td><a href="/wallet/' + wallet.address + '" class="address">' + formatAddress(wallet.address) + '</a></td>';
+                html += '<td class="balance">' + formatBalance(wallet.balance) + '</td>';
+                html += '<td style="text-align: center;">' + wallet.transaction_count + '</td>';
+                html += '<td style="text-align: center;">' + wallet.blocks_mined + '</td>';
+                html += '<td class="token-list">';
+
+                if (wallet.token_balances && wallet.token_balances.length > 0) {
+                    wallet.token_balances.forEach(token => {
+                        html += '<div class="token-item">' + formatTokenBalance(token) + '</div>';
+                    });
+                } else {
+                    html += '<span style="color: #999;">None</span>';
+                }
+
+                html += '</td>';
+                html += '<td>' + (wallet.last_activity === '0001-01-01T00:00:00Z' ? 'Never' : new Date(wallet.last_activity).toLocaleString()) + '</td>';
+                html += '</tr>';
+            });
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        function updatePagination(data) {
+            const container = document.getElementById('pagination');
+            let html = '';
+
+            if (data.current_page > 1) {
+                html += '<a href="#" onclick="loadWallets(' + (data.current_page - 1) + ')">← Previous</a>';
+            }
+
+            const maxButtons = 5;
+            const startPage = Math.max(1, data.current_page - Math.floor(maxButtons / 2));
+            const endPage = Math.min(data.total_pages, startPage + maxButtons - 1);
+
+            for (let i = startPage; i <= endPage; i++) {
+                const className = i === data.current_page ? 'current' : '';
+                html += '<a href="#" class="' + className + '" onclick="loadWallets(' + i + ')">' + i + '</a>';
+            }
+
+            if (data.current_page < data.total_pages) {
+                html += '<a href="#" onclick="loadWallets(' + (data.current_page + 1) + ')">Next →</a>';
+            }
+
+            container.innerHTML = html;
+        }
+
+        // Load wallets on page load
+        loadWallets();
+    </script>
+</body>
+</html>`
+
+    w.Header().Set("Content-Type", "text/html")
+    fmt.Fprint(w, tmpl)
 }
 
 func min(a, b int) int {
@@ -1307,7 +1667,7 @@ func (es *ExplorerServer) handleWalletPage(w http.ResponseWriter, r *http.Reques
                 const container = document.getElementById('walletDetails');
                 
                 // Format balance (convert from satoshi-like units)
-                const balanceFormatted = (wallet.balance / 1000000).toFixed(6);
+                const balanceFormatted = (wallet.balance / 100000000).toFixed(8);
                 const firstActivity = wallet.first_activity ? new Date(wallet.first_activity).toLocaleDateString() : 'Never';
                 const lastActivity = wallet.last_activity ? new Date(wallet.last_activity).toLocaleDateString() : 'Never';
                 
@@ -1357,7 +1717,7 @@ func (es *ExplorerServer) handleWalletPage(w http.ResponseWriter, r *http.Reques
                                 <div class="space-y-2 max-h-96 overflow-y-auto">
                                     ${wallet.transactions.map(tx => {
                                         const timestamp = new Date(tx.timestamp).toLocaleString();
-                                        const amount = (tx.amount / 1000000).toFixed(6);
+                                        const amount = (tx.amount / 100000000).toFixed(8);
                                         const isReceived = tx.to_address === address;
                                         const typeColor = tx.type === 'mining_reward' ? 'text-yellow-400' : 
                                                          isReceived ? 'text-green-400' : 'text-red-400';
@@ -2402,39 +2762,39 @@ func (es *ExplorerServer) handleStoragePage(w http.ResponseWriter, r *http.Reque
     w.Write([]byte(tmpl))
 }
 
-// detectShadowyNode attempts to find the running Shadowy node
+// detectShadowyNode attempts to find the running Tendermint node
 func detectShadowyNode() string {
-    ports := []string{"8081", "8080"}
+    ports := []string{"26657"}
     client := &http.Client{Timeout: 3 * time.Second}
 
     for _, port := range ports {
         url := fmt.Sprintf("http://localhost:%s", port)
-        log.Printf("🔍 Checking for Shadowy node at %s...", url)
+        log.Printf("🔍 Checking for Tendermint node at %s...", url)
 
-        resp, err := client.Get(url + "/api/v1/blockchain")
+        resp, err := client.Get(url + "/status")
         if err != nil {
-            log.Printf("❌ Failed to connect to Shadowy node at %s: %v", url, err)
+            log.Printf("❌ Failed to connect to Tendermint node at %s: %v", url, err)
         }
         if err == nil && resp.StatusCode == http.StatusOK {
             resp.Body.Close()
-            log.Printf("✅ Found Shadowy node at %s", url)
+            log.Printf("✅ Found Tendermint node at %s", url)
             return url
         }
         if resp != nil {
-            log.Printf("❌ Failed to connect to Shadowy node at %s / %d", url+"/api/v1/blockchain", resp.StatusCode)
+            log.Printf("❌ Failed to connect to Tendermint node at %s/status / %d", url, resp.StatusCode)
             resp.Body.Close()
         }
     }
 
-    log.Fatalln("⚠️ No Shadowy node found on ports 8080 or 8081, shutting down...")
-    return "http://localhost:8080"
+    log.Fatalln("⚠️ No Tendermint node found on port 26657, shutting down...")
+    return "http://localhost:26657"
 }
 
 func main() {
     fmt.Println("🌟 Starting Shadowy Blockchain Explorer...")
 
-    // Auto-detect Shadowy node or use environment variable
-    shadowyNodeURL := "http://localhost:8080"
+    // Auto-detect Tendermint node or use environment variable
+    shadowyNodeURL := "http://localhost:26657"
     if url := os.Getenv("SHADOWY_NODE_URL"); url != "" {
         shadowyNodeURL = url
         log.Printf("📍 Using SHADOWY_NODE_URL: %s", shadowyNodeURL)

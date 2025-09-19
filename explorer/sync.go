@@ -2,11 +2,13 @@ package main
 
 import (
     "crypto/sha256"
+    "encoding/base64"
     "encoding/hex"
     "encoding/json"
     "fmt"
     "log"
     "net/http"
+    "strconv"
     "time"
 )
 
@@ -90,15 +92,105 @@ func (s *SyncService) syncOnce() {
     log.Printf("✅ Sync completed")
 }
 
-// BlockchainStats represents the stats from the Shadowy node
+// BlockchainStats represents the stats from the Tendermint node
 type BlockchainStats struct {
     TipHeight uint64 `json:"tip_height"`
     TipHash   string `json:"tip_hash"`
 }
 
-// getBlockchainStats fetches blockchain statistics from the node
+// TendermintStatusResponse represents Tendermint /status response
+type TendermintStatusResponse struct {
+    Result struct {
+        SyncInfo struct {
+            LatestBlockHeight string `json:"latest_block_height"`
+            LatestBlockHash   string `json:"latest_block_hash"`
+        } `json:"sync_info"`
+    } `json:"result"`
+}
+
+// TendermintBlockResponse represents Tendermint /block response
+type TendermintBlockResponse struct {
+    Result struct {
+        Block struct {
+            Header struct {
+                Height string    `json:"height"`
+                Time   time.Time `json:"time"`
+                ChainID string   `json:"chain_id"`
+            } `json:"header"`
+            Data struct {
+                Txs []string `json:"txs"` // Base64 encoded transactions
+            } `json:"data"`
+        } `json:"block"`
+    } `json:"result"`
+}
+
+// convertTendermintBlock converts a Tendermint block to our Block format
+func (s *SyncService) convertTendermintBlock(tmResp *TendermintBlockResponse) (*Block, error) {
+    // Parse height from string
+    height, err := strconv.ParseUint(tmResp.Result.Block.Header.Height, 10, 64)
+    if err != nil {
+        return nil, fmt.Errorf("failed to parse height: %w", err)
+    }
+
+    // Convert transactions from base64
+    var transactions []*SignedTransaction
+    for _, txB64 := range tmResp.Result.Block.Data.Txs {
+        txBytes, err := base64.StdEncoding.DecodeString(txB64)
+        if err != nil {
+            log.Printf("❌ Failed to decode transaction from base64: %v", err)
+            continue
+        }
+
+        var signedTx SignedTransaction
+        if err := json.Unmarshal(txBytes, &signedTx); err != nil {
+            log.Printf("❌ Failed to unmarshal signed transaction: %v", err)
+            continue
+        }
+
+        transactions = append(transactions, &signedTx)
+    }
+
+    // Convert pointer slice to value slice for BlockBody
+    var signedTxs []SignedTransaction
+    for _, tx := range transactions {
+        signedTxs = append(signedTxs, *tx)
+    }
+
+    // Create our Block structure
+    block := &Block{
+        Header: BlockHeader{
+            Version:           1,
+            PreviousBlockHash: "", // Will be filled by hash calculation if needed
+            MerkleRoot:        "", // Will be calculated
+            Timestamp:         tmResp.Result.Block.Header.Time,
+            Height:            height,
+            Nonce:             0,  // Not used in Tendermint
+            ChallengeSeed:     "", // Not used in Tendermint
+            ProofHash:         "", // Not used in Tendermint  
+            FarmerAddress:     "", // Will be extracted from coinbase tx if present
+            PlotID:            "", // Not used in Tendermint
+        },
+        Body: BlockBody{
+            Transactions:     signedTxs,
+            TxCount:          uint32(len(signedTxs)),
+            TransactionsHash: "", // Will be calculated
+        },
+    }
+
+    // Look for coinbase transaction to get miner address
+    for _, tx := range transactions {
+        if tx.Algorithm == "coinbase" {
+            block.Header.FarmerAddress = tx.SignerKey
+            break
+        }
+    }
+
+    return block, nil
+}
+
+// getBlockchainStats fetches blockchain statistics from Tendermint
 func (s *SyncService) getBlockchainStats() (*BlockchainStats, error) {
-    theURL := fmt.Sprintf("%s/api/v1/blockchain", s.nodeURL)
+    theURL := fmt.Sprintf("%s/status", s.nodeURL)
     resp, err := s.client.Get(theURL)
     if err != nil {
         return nil, fmt.Errorf("failed to fetch stats: %w", err)
@@ -109,12 +201,23 @@ func (s *SyncService) getBlockchainStats() (*BlockchainStats, error) {
         return nil, fmt.Errorf("%s returned status %d", theURL, resp.StatusCode)
     }
 
-    var stats BlockchainStats
-    if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
-        return nil, fmt.Errorf("failed to decode stats: %w", err)
+    var tendermintResp TendermintStatusResponse
+    if err := json.NewDecoder(resp.Body).Decode(&tendermintResp); err != nil {
+        return nil, fmt.Errorf("failed to decode Tendermint status: %w", err)
     }
 
-    return &stats, nil
+    // Parse height from string
+    height, err := strconv.ParseUint(tendermintResp.Result.SyncInfo.LatestBlockHeight, 10, 64)
+    if err != nil {
+        return nil, fmt.Errorf("failed to parse height: %w", err)
+    }
+
+    stats := &BlockchainStats{
+        TipHeight: height,
+        TipHash:   tendermintResp.Result.SyncInfo.LatestBlockHash,
+    }
+
+    return stats, nil
 }
 
 // syncBlocks syncs blocks from startHeight to endHeight
@@ -152,34 +255,40 @@ func (s *SyncService) syncBlockBatch(startHeight, endHeight uint64) error {
     return nil
 }
 
-// syncBlock syncs a single block
+// syncBlock syncs a single block from Tendermint
 func (s *SyncService) syncBlock(height uint64) error {
-    // Get block from node
-    resp, err := s.client.Get(fmt.Sprintf("%s/api/v1/blockchain/block/height/%d", s.nodeURL, height))
+    // Get block from Tendermint
+    resp, err := s.client.Get(fmt.Sprintf("%s/block?height=%d", s.nodeURL, height))
     if err != nil {
         return fmt.Errorf("failed to fetch block: %w", err)
     }
     defer resp.Body.Close()
 
     if resp.StatusCode != http.StatusOK {
-        return fmt.Errorf("node returned status %d", resp.StatusCode)
+        return fmt.Errorf("Tendermint returned status %d", resp.StatusCode)
     }
 
-    var block Block
-    if err := json.NewDecoder(resp.Body).Decode(&block); err != nil {
-        return fmt.Errorf("failed to decode block: %w", err)
+    var tmBlockResp TendermintBlockResponse
+    if err := json.NewDecoder(resp.Body).Decode(&tmBlockResp); err != nil {
+        return fmt.Errorf("failed to decode Tendermint block: %w", err)
     }
 
-    // Calculate block hash
-    blockHash := s.calculateBlockHash(&block)
+    // Convert Tendermint block to our Block format
+    block, err := s.convertTendermintBlock(&tmBlockResp)
+    if err != nil {
+        return fmt.Errorf("failed to convert Tendermint block: %w", err)
+    }
+
+    // Calculate block hash from Tendermint data
+    blockHash := s.calculateBlockHash(block)
 
     // Store in database
-    if err := s.database.StoreBlock(blockHash, &block); err != nil {
+    if err := s.database.StoreBlock(blockHash, block); err != nil {
         return fmt.Errorf("failed to store block: %w", err)
     }
     
     // Extract and store individual transactions
-    if err := s.extractAndStoreTransactions(blockHash, &block); err != nil {
+    if err := s.extractAndStoreTransactions(blockHash, block); err != nil {
         log.Printf("❌ Failed to extract transactions from block %d: %v", block.Header.Height, err)
         // Don't fail the entire sync for transaction parsing errors
     }
@@ -232,7 +341,70 @@ func (s *SyncService) GetNetworkStats() (*NetworkStats, error) {
 func (s *SyncService) extractAndStoreTransactions(blockHash string, block *Block) error {
     log.Printf("📦 Block %d: Processing %d transactions", block.Header.Height, len(block.Body.Transactions))
     for _, signedTx := range block.Body.Transactions {
-        // Parse the raw transaction
+        // Handle special case for coinbase transactions
+        if signedTx.Algorithm == "coinbase" {
+            // For coinbase transactions, the Transaction field is base64-encoded JSON
+            // First, handle the json.RawMessage - it might be a quoted JSON string
+            transactionStr := string(signedTx.Transaction)
+            
+            // If it's a quoted JSON string, unmarshal it first
+            if transactionStr[0] == '"' && transactionStr[len(transactionStr)-1] == '"' {
+                var quotedStr string
+                if err := json.Unmarshal(signedTx.Transaction, &quotedStr); err != nil {
+                    log.Printf("❌ Failed to unmarshal quoted transaction: %v", err)
+                    continue
+                }
+                transactionStr = quotedStr
+            }
+            
+            // Fix invalid coinbase transaction hash
+            actualTxHash := signedTx.TxHash
+            if actualTxHash == "transaction" {
+                // Generate a proper hash for coinbase transactions
+                actualTxHash = fmt.Sprintf("coinbase_%s", blockHash)
+            }
+
+            log.Printf("🔍 Debug coinbase: TxHash='%s' -> '%s', Algorithm='%s', Transaction='%s'",
+                signedTx.TxHash, actualTxHash, signedTx.Algorithm, transactionStr[:100])
+
+            txBytes, err := base64.StdEncoding.DecodeString(transactionStr)
+            if err != nil {
+                log.Printf("❌ Failed to decode base64 transaction %s: %v", actualTxHash, err)
+                continue
+            }
+
+            var tx Transaction
+            if err := json.Unmarshal(txBytes, &tx); err != nil {
+                log.Printf("❌ Failed to parse decoded transaction %s: %v", actualTxHash, err)
+                continue
+            }
+            
+            // Process coinbase transaction - it's a mining reward
+            for _, output := range tx.Outputs {
+                if output.Address != "" {
+                    walletTx := &WalletTransaction{
+                        TxHash:      actualTxHash,
+                        BlockHash:   blockHash,
+                        BlockHeight: block.Header.Height,
+                        Timestamp:   block.Header.Timestamp, // Use block timestamp for coinbase
+                        Type:        "mining_reward",
+                        Amount:      output.Value,
+                        Fee:         0,
+                        FromAddress: "", // Coinbase has no from address
+                        ToAddress:   output.Address,
+                    }
+                    
+                    if err := s.database.StoreTransaction(walletTx); err != nil {
+                        log.Printf("❌ Failed to store coinbase transaction: %v", err)
+                    } else {
+                        log.Printf("💰 Stored mining reward: %.8f SHADOW to %s", float64(output.Value)/100000000.0, output.Address)
+                    }
+                }
+            }
+            continue
+        }
+        
+        // Parse regular (non-coinbase) transactions
         var tx Transaction
         if err := json.Unmarshal(signedTx.Transaction, &tx); err != nil {
             log.Printf("❌ Failed to parse transaction %s: %v", signedTx.TxHash, err)
@@ -300,26 +472,8 @@ func (s *SyncService) extractAndStoreTransactions(blockHash string, block *Block
             }
         }
     }
-    
-    // Store mining reward for the farmer
-    if block.Header.FarmerAddress != "" {
-        // Mining reward transaction
-        rewardTx := &WalletTransaction{
-            TxHash:      fmt.Sprintf("mining_%s", blockHash),
-            BlockHash:   blockHash,
-            BlockHeight: block.Header.Height,
-            Timestamp:   block.Header.Timestamp,
-            Type:        "mining_reward",
-            Amount:      1000000, // Placeholder - should be actual block reward
-            Fee:         0,
-            FromAddress: "",
-            ToAddress:   block.Header.FarmerAddress,
-        }
-        
-        if err := s.database.StoreTransaction(rewardTx); err != nil {
-            log.Printf("❌ Failed to store mining reward %s: %v", rewardTx.TxHash, err)
-        }
-    }
+
+    // Mining rewards are now processed as coinbase transactions above, so no separate mining reward needed
     
     return nil
 }

@@ -16,5 +16,8 @@ echo "Using BUILD_NUMBER=$BUILD_NUMBER"
 GO_LDFLAGS="-X 'shadowyapparatus/cmd.BuildNumber=$BUILD_NUMBER'"
 go build -ldflags="$GO_LDFLAGS" -o shadowyapparatus . 
 ssh nanocat@192.168.68.62 'killall shadowyapparatus || true'
-scp shadowyapparatus nanocat@192.168.68.62:/home/nanocat/shadowy/
+scp shadowyapparatus *.gz nanocat@192.168.68.62:/home/nanocat/shadowy/
+ssh bodhi@192.168.20.129 'killall shadowyapparatus || true'
+scp shadowyapparatus *.gz bodhi@192.168.20.129:/home/bodhi/
+./shadowyapparatus tendermint
 

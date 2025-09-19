@@ -311,32 +311,63 @@ func (d *Database) StoreTransaction(tx *WalletTransaction) error {
 // GetWalletTransactions retrieves transactions for an address
 func (d *Database) GetWalletTransactions(address string, limit int) ([]WalletTransaction, error) {
 	var transactions []WalletTransaction
-	
+
+	log.Printf("🔍 [DEBUG] GetWalletTransactions: Looking for address %s with limit %d", address, limit)
+
 	err := d.db.View(func(txn *badger.Txn) error {
 		// Create iterator for address transactions (newest first)
+		prefix := fmt.Sprintf("addr_tx:%s:", address)
 		opts := badger.DefaultIteratorOptions
 		opts.Reverse = true
-		opts.Prefix = []byte(fmt.Sprintf("addr_tx:%s:", address))
+		// REMOVED: opts.Prefix = []byte(prefix) -- This is not working correctly
 		it := txn.NewIterator(opts)
 		defer it.Close()
-		
+
+		log.Printf("🔍 [DEBUG] GetWalletTransactions: Using manual prefix matching for '%s'", prefix)
+
+		// Collect matching transactions using manual prefix matching
 		count := 0
+		keysFound := 0
 		for it.Rewind(); it.Valid() && count < limit; it.Next() {
 			item := it.Item()
+			addrTxKey := string(item.Key())
+
+			// Manual prefix matching instead of BadgerDB's opts.Prefix
+			if !strings.HasPrefix(addrTxKey, prefix) {
+				continue // Skip keys that don't match our prefix
+			}
+
+			keysFound++
+
+			if count < 3 { // Only log first few for debugging
+				log.Printf("🔍 [DEBUG] Processing addr_tx key #%d: %s", count+1, addrTxKey)
+			}
+
 			err := item.Value(func(val []byte) error {
 				txHash := string(val)
-				
+				if count < 3 {
+					log.Printf("🔍 [DEBUG] TxHash from key: %s", txHash)
+				}
+
 				// Get the full transaction
 				txKey := fmt.Sprintf("tx:%s", txHash)
+				if count < 3 {
+					log.Printf("🔍 [DEBUG] Looking for tx key: %s", txKey)
+				}
 				txItem, err := txn.Get([]byte(txKey))
 				if err != nil {
+					log.Printf("❌ [DEBUG] Failed to find tx key %s: %v", txKey, err)
 					return nil // Skip missing transactions
 				}
-				
+
 				return txItem.Value(func(txData []byte) error {
 					var walletTx WalletTransaction
 					if err := json.Unmarshal(txData, &walletTx); err != nil {
+						log.Printf("❌ [DEBUG] Failed to unmarshal tx data: %v", err)
 						return nil // Skip invalid transactions
+					}
+					if count < 3 {
+						log.Printf("✅ [DEBUG] Successfully retrieved transaction: %s, Type: %s, Amount: %d SHADOW (%.8f)", walletTx.TxHash, walletTx.Type, walletTx.Amount, float64(walletTx.Amount)/100000000.0)
 					}
 					transactions = append(transactions, walletTx)
 					return nil
@@ -347,31 +378,46 @@ func (d *Database) GetWalletTransactions(address string, limit int) ([]WalletTra
 			}
 			count++
 		}
-		
+
+		log.Printf("🔍 [DEBUG] GetWalletTransactions completed: Found %d keys, retrieved %d transactions for address %s", keysFound, len(transactions), address)
+
 		return nil
 	})
-	
+
+	log.Printf("🔍 [DEBUG] GetWalletTransactions final result: %d transactions returned for %s", len(transactions), address)
+
 	return transactions, err
 }
 
 // GetWalletSummary gets wallet statistics
 func (d *Database) GetWalletSummary(address string) (*WalletSummary, error) {
-	transactions, err := d.GetWalletTransactions(address, 50) // Get recent transactions
+	log.Printf("🔍 [DEBUG] GetWalletSummary: Called for address %s", address)
+
+	// Get recent transactions for display (limited)
+	transactions, err := d.GetWalletTransactions(address, 50)
+	if err != nil {
+		log.Printf("🔍 [DEBUG] GetWalletSummary: Error getting recent transactions: %v", err)
+		return nil, err
+	}
+	log.Printf("🔍 [DEBUG] GetWalletSummary: Got %d recent transactions", len(transactions))
+	
+	// Get ALL transactions for accurate balance calculation
+	allTransactions, err := d.GetWalletTransactions(address, 999999) // Very high limit to get all
 	if err != nil {
 		return nil, err
 	}
 	
 	summary := &WalletSummary{
 		Address:      address,
-		Transactions: transactions,
+		Transactions: transactions, // Only show recent transactions in UI
 	}
 	
-	// Calculate statistics
+	// Calculate statistics using ALL transactions
 	var balance uint64
 	var blocksMined int
 	var firstActivity, lastActivity time.Time
 	
-	for i, tx := range transactions {
+	for i, tx := range allTransactions {
 		// Set first/last activity
 		if i == 0 || tx.Timestamp.After(lastActivity) {
 			lastActivity = tx.Timestamp
@@ -394,13 +440,159 @@ func (d *Database) GetWalletSummary(address string) (*WalletSummary, error) {
 		}
 	}
 	
+	// Get token balances for this wallet
+	tokenBalances, err := d.GetWalletTokenBalances(address)
+	if err != nil {
+		log.Printf("❌ Failed to get token balances for %s: %v", address, err)
+		tokenBalances = []TokenBalance{} // Continue with empty token balances
+	}
+
 	summary.Balance = balance
-	summary.TransactionCount = len(transactions)
+	summary.TransactionCount = len(allTransactions) // Total count, not just recent
 	summary.BlocksMined = blocksMined
 	summary.FirstActivity = firstActivity
 	summary.LastActivity = lastActivity
-	
+	summary.TokenBalances = tokenBalances
+
 	return summary, nil
+}
+
+// GetAllWallets gets all wallets with basic info
+func (d *Database) GetAllWallets(limit int, offset int) ([]WalletOverview, int64, error) {
+	// First, collect all unique wallet addresses from transaction indices
+	addressMap := make(map[string]bool)
+
+	err := d.db.View(func(txn *badger.Txn) error {
+		// Scan through all addr_tx keys to find unique addresses
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefix := []byte("addr_tx:")
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			key := string(it.Item().Key())
+			// Format: addr_tx:address:blockheight:txhash
+			parts := strings.Split(key, ":")
+			if len(parts) >= 2 {
+				address := parts[1]
+				addressMap[address] = true
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, 0, err
+	}
+
+	// Convert map keys to slice
+	var addresses []string
+	for addr := range addressMap {
+		addresses = append(addresses, addr)
+	}
+
+	// Apply pagination
+	total := int64(len(addresses))
+	start := offset
+	end := offset + limit
+	if start > len(addresses) {
+		return []WalletOverview{}, total, nil
+	}
+	if end > len(addresses) {
+		end = len(addresses)
+	}
+
+	paginatedAddresses := addresses[start:end]
+
+	// Get wallet summaries for paginated addresses
+	var wallets []WalletOverview
+	for _, address := range paginatedAddresses {
+		summary, err := d.GetWalletSummary(address)
+		if err != nil {
+			log.Printf("❌ Failed to get wallet summary for %s: %v", address, err)
+			continue
+		}
+
+		// Get token balances for this wallet
+		tokenBalances, err := d.GetWalletTokenBalances(address)
+		if err != nil {
+			log.Printf("❌ Failed to get token balances for %s: %v", address, err)
+			tokenBalances = []TokenBalance{} // Continue with empty token balances
+		}
+
+		wallet := WalletOverview{
+			Address:           summary.Address,
+			Balance:           summary.Balance,
+			TransactionCount:  summary.TransactionCount,
+			BlocksMined:       summary.BlocksMined,
+			FirstActivity:     summary.FirstActivity,
+			LastActivity:      summary.LastActivity,
+			TokenBalances:     tokenBalances,
+		}
+
+		wallets = append(wallets, wallet)
+	}
+
+	return wallets, total, nil
+}
+
+// GetWalletTokenBalances gets all token balances for a wallet address
+func (d *Database) GetWalletTokenBalances(address string) ([]TokenBalance, error) {
+	var balances []TokenBalance
+
+	// This is a simplified version - in a production system you'd maintain
+	// a separate index of token holders for better performance
+	err := d.db.View(func(txn *badger.Txn) error {
+		// Scan all token holder keys
+		opts := badger.DefaultIteratorOptions
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefix := []byte("token_holder:")
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			key := string(it.Item().Key())
+			// Format: token_holder:tokenId:address
+			parts := strings.Split(key, ":")
+			if len(parts) >= 3 && parts[2] == address {
+				tokenId := parts[1]
+
+				// Get balance
+				err := it.Item().Value(func(val []byte) error {
+					var holder TokenHolder
+					if err := json.Unmarshal(val, &holder); err != nil {
+						return err
+					}
+
+					if holder.Balance > 0 {
+						// Get token info
+						tokenInfo, err := d.GetToken(tokenId)
+						if err != nil {
+							log.Printf("❌ Failed to get token info for %s: %v", tokenId, err)
+							return nil // Skip this balance
+						}
+
+						balance := TokenBalance{
+							TokenID:     tokenId,
+							TokenName:   tokenInfo.Name,
+							TokenTicker: tokenInfo.Ticker,
+							Balance:     holder.Balance,
+							Decimals:    tokenInfo.Decimals,
+						}
+						balances = append(balances, balance)
+					}
+					return nil
+				})
+
+				if err != nil {
+					log.Printf("❌ Failed to process token holder %s: %v", key, err)
+				}
+			}
+		}
+		return nil
+	})
+
+	return balances, err
 }
 
 // StoreToken stores token information

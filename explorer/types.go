@@ -151,6 +151,7 @@ type WalletSummary struct {
 	FirstActivity      time.Time           `json:"first_activity"`
 	LastActivity       time.Time           `json:"last_activity"`
 	Transactions       []WalletTransaction `json:"transactions"`
+	TokenBalances      []TokenBalance      `json:"token_balances"`
 }
 
 // TokenInfo represents token statistics for the explorer
@@ -291,4 +292,33 @@ type PoolTransaction struct {
 type PoolDetails struct {
 	LiquidityPool
 	Transactions []PoolTransaction `json:"recent_transactions"`
+}
+
+// WalletOverview represents wallet for the wallets table
+type WalletOverview struct {
+	Address           string                 `json:"address"`
+	Balance           uint64                 `json:"balance"`
+	TransactionCount  int                    `json:"transaction_count"`
+	BlocksMined       int                    `json:"blocks_mined"`
+	FirstActivity     time.Time              `json:"first_activity"`
+	LastActivity      time.Time              `json:"last_activity"`
+	TokenBalances     []TokenBalance         `json:"token_balances"`
+}
+
+// TokenBalance represents a token balance for a wallet
+type TokenBalance struct {
+	TokenID     string `json:"token_id"`
+	TokenName   string `json:"token_name"`
+	TokenTicker string `json:"token_ticker"`
+	Balance     uint64 `json:"balance"`
+	Decimals    uint8  `json:"decimals"`
+}
+
+// PaginatedWallets represents a paginated response of wallets
+type PaginatedWallets struct {
+	Wallets     []WalletOverview `json:"wallets"`
+	CurrentPage int              `json:"current_page"`
+	TotalPages  int              `json:"total_pages"`
+	TotalWallets int64           `json:"total_wallets"`
+	PerPage     int              `json:"per_page"`
 }

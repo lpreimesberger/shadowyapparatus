@@ -1825,6 +1825,102 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
                 padding: 0.5rem 0.75rem;
             }
         }
+
+        /* Network Tab Styles */
+        .status-grid, .consensus-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+
+        .status-item, .consensus-item {
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 0.75rem;
+        }
+
+        .peers-summary {
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+
+        .peer-card, .validator-card {
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 0.5rem 0;
+        }
+
+        .peer-header, .validator-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+            font-weight: bold;
+        }
+
+        .peer-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+            gap: 0.5rem;
+            font-size: 0.9rem;
+            color: #ccc;
+        }
+
+        .peer-id, .validator-address, .validator-pubkey {
+            font-family: 'Courier New', monospace;
+            font-size: 0.8rem;
+            background: #1a1a1a;
+            padding: 0.25rem;
+            border-radius: 4px;
+        }
+
+        .validator-power {
+            font-size: 0.9rem;
+            color: #8b5cf6;
+            font-weight: bold;
+        }
+
+        .chain-stats {
+            display: flex;
+            justify-content: space-around;
+            align-items: center;
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 8px;
+            padding: 1rem;
+            margin: 1rem 0;
+        }
+
+        .badge-warning {
+            background: #f59e0b;
+            color: #1a1a1a;
+        }
+
+        .badge-success {
+            background: #10b981;
+            color: #1a1a1a;
+        }
+
+        .hash {
+            word-break: break-all;
+        }
+
+        .no-data {
+            text-align: center;
+            color: #666;
+            font-style: italic;
+            padding: 2rem;
+            background: #2d2d2d;
+            border: 1px solid #404040;
+            border-radius: 8px;
+        }
     </style>
 </head>
 <body>
@@ -1893,6 +1989,7 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
             <div class="main-tab-header">
                 <button class="main-tab-button active" onclick="switchMainTab('wallet')">💼 Wallet</button>
                 <button class="main-tab-button" onclick="switchMainTab('node')">🖥️ Node</button>
+                <button class="main-tab-button" onclick="switchMainTab('network')">🌐 Network</button>
                 <button class="main-tab-button" onclick="switchMainTab('foundry')">🏭 Foundry</button>
                 <button class="main-tab-button" onclick="switchMainTab('swap')">🔄 Swap</button>
             </div>
@@ -1911,6 +2008,13 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
                 <div id="node-subtabs" class="sub-tab-header">
                     <button class="sub-tab-button active" onclick="switchSubTab('node', 'syndicates')">🐉 Syndicates</button>
                     <button class="sub-tab-button" onclick="switchSubTab('node', 'blocks')">🗂️ Blocks</button>
+                </div>
+
+                <!-- Network sub-tabs -->
+                <div id="network-subtabs" class="sub-tab-header">
+                    <button class="sub-tab-button active" onclick="switchSubTab('network', 'status')">📊 Status</button>
+                    <button class="sub-tab-button" onclick="switchSubTab('network', 'peers')">👥 Peers</button>
+                    <button class="sub-tab-button" onclick="switchSubTab('network', 'consensus')">🤝 Consensus</button>
                 </div>
 
                 <!-- Foundry sub-tabs -->
@@ -2057,6 +2161,103 @@ func (sn *ShadowNode) serveWalletDashboard(w http.ResponseWriter, r *http.Reques
                             <div class="loading">Loading syndicate statistics...</div>
                         </div>
                         <button class="btn btn-secondary" onclick="refreshSyndicateStats()">🔄 Refresh Stats</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Network Status Tab -->
+            <div id="network-status-tab" class="tab-content">
+                <div class="network-header">
+                    <h2>📊 Network Status</h2>
+                    <p>Real-time Tendermint network synchronization and health status.</p>
+                </div>
+
+                <div class="network-sections">
+                    <!-- Sync Status Section -->
+                    <div class="section-card">
+                        <h3>🔄 Synchronization Status</h3>
+                        <div id="sync-status">
+                            <div class="loading">Loading sync status...</div>
+                        </div>
+                        <button class="btn btn-secondary" onclick="refreshSyncStatus()">🔄 Refresh Status</button>
+                    </div>
+
+                    <!-- Block Height Section -->
+                    <div class="section-card">
+                        <h3>⛓️ Block Information</h3>
+                        <div id="block-info">
+                            <div class="loading">Loading block information...</div>
+                        </div>
+                    </div>
+
+                    <!-- Node Health Section -->
+                    <div class="section-card">
+                        <h3>❤️ Node Health</h3>
+                        <div id="node-health">
+                            <div class="loading">Loading node health...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Network Peers Tab -->
+            <div id="network-peers-tab" class="tab-content">
+                <div class="peers-header">
+                    <h2>👥 Network Peers</h2>
+                    <p>Connected peers and network topology information.</p>
+                </div>
+
+                <div class="peers-sections">
+                    <!-- Connected Peers Section -->
+                    <div class="section-card">
+                        <h3>🔗 Connected Peers</h3>
+                        <div id="connected-peers">
+                            <div class="loading">Loading connected peers...</div>
+                        </div>
+                        <button class="btn btn-secondary" onclick="refreshPeers()">🔄 Refresh Peers</button>
+                    </div>
+
+                    <!-- Peer Details Section -->
+                    <div class="section-card">
+                        <h3>📊 Peer Statistics</h3>
+                        <div id="peer-stats">
+                            <div class="loading">Loading peer statistics...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Network Consensus Tab -->
+            <div id="network-consensus-tab" class="tab-content">
+                <div class="consensus-header">
+                    <h2>🤝 Consensus Information</h2>
+                    <p>Tendermint consensus state and validator information.</p>
+                </div>
+
+                <div class="consensus-sections">
+                    <!-- Consensus State Section -->
+                    <div class="section-card">
+                        <h3>🎯 Consensus State</h3>
+                        <div id="consensus-state">
+                            <div class="loading">Loading consensus state...</div>
+                        </div>
+                        <button class="btn btn-secondary" onclick="refreshConsensusState()">🔄 Refresh State</button>
+                    </div>
+
+                    <!-- Validators Section -->
+                    <div class="section-card">
+                        <h3>⚖️ Validators</h3>
+                        <div id="validators-info">
+                            <div class="loading">Loading validators...</div>
+                        </div>
+                    </div>
+
+                    <!-- Chain Info Section -->
+                    <div class="section-card">
+                        <h3>⛓️ Chain Information</h3>
+                        <div id="chain-info">
+                            <div class="loading">Loading chain information...</div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -6366,6 +6567,205 @@ func (sn *ShadowNode) handleWebWalletPeers(w http.ResponseWriter, r *http.Reques
 
         function refreshSyndicateStats() {
             loadSyndicateStats();
+        }
+
+        // Network Status Functions
+        async function refreshSyncStatus() {
+            const container = document.getElementById('sync-status');
+            container.innerHTML = '<div class="loading">Refreshing sync status...</div>';
+            await loadNetworkStatus();
+        }
+
+        async function refreshPeers() {
+            const container = document.getElementById('connected-peers');
+            container.innerHTML = '<div class="loading">Refreshing peers...</div>';
+            await loadNetworkPeers();
+        }
+
+        async function refreshConsensusState() {
+            const container = document.getElementById('consensus-state');
+            container.innerHTML = '<div class="loading">Refreshing consensus state...</div>';
+            await loadNetworkConsensus();
+        }
+
+        async function loadNetworkStatus() {
+            try {
+                const response = await fetch('/wallet/network/status');
+                if (!response.ok) throw new Error('Network request failed');
+                const data = await response.json();
+
+                const syncStatus = document.getElementById('sync-status');
+                const blockInfo = document.getElementById('block-info');
+                const nodeHealth = document.getElementById('node-health');
+
+                syncStatus.innerHTML = ` + "`" + `
+                    <div class="status-grid">
+                        <div class="status-item">
+                            <strong>Node ID:</strong> <span class="mono">${data.node_id || 'Unknown'}</span>
+                        </div>
+                        <div class="status-item">
+                            <strong>Network:</strong> <span class="badge">${data.network || 'Unknown'}</span>
+                        </div>
+                        <div class="status-item">
+                            <strong>Catching Up:</strong>
+                            <span class="badge ${data.catching_up ? 'badge-warning' : 'badge-success'}">
+                                ${data.catching_up ? 'Yes' : 'No'}
+                            </span>
+                        </div>
+                    </div>
+                ` + "`" + `;
+
+                blockInfo.innerHTML = ` + "`" + `
+                    <div class="status-grid">
+                        <div class="status-item">
+                            <strong>Latest Height:</strong> <span class="mono">${data.latest_height || 'Unknown'}</span>
+                        </div>
+                        <div class="status-item">
+                            <strong>Latest Hash:</strong> <span class="mono hash">${(data.latest_hash || 'Unknown').substring(0, 16)}...</span>
+                        </div>
+                        <div class="status-item">
+                            <strong>Block Time:</strong> <span>${new Date(data.latest_time).toLocaleString()}</span>
+                        </div>
+                    </div>
+                ` + "`" + `;
+
+                nodeHealth.innerHTML = ` + "`" + `
+                    <div class="status-grid">
+                        <div class="status-item">
+                            <strong>Status:</strong> <span class="badge badge-success">${data.status}</span>
+                        </div>
+                        <div class="status-item">
+                            <strong>Version:</strong> <span class="mono">${data.version || 'Unknown'}</span>
+                        </div>
+                        <div class="status-item">
+                            <strong>Validator Power:</strong> <span class="mono">${data.validator_power || '0'}</span>
+                        </div>
+                    </div>
+                ` + "`" + `;
+            } catch (error) {
+                document.getElementById('sync-status').innerHTML = '<div class="error">Error loading sync status: ' + error.message + '</div>';
+                document.getElementById('block-info').innerHTML = '<div class="error">Error loading block info</div>';
+                document.getElementById('node-health').innerHTML = '<div class="error">Error loading node health</div>';
+            }
+        }
+
+        async function loadNetworkPeers() {
+            try {
+                const response = await fetch('/wallet/network/peers');
+                if (!response.ok) throw new Error('Network request failed');
+                const data = await response.json();
+
+                const connectedPeers = document.getElementById('connected-peers');
+                const peerStats = document.getElementById('peer-stats');
+
+                let peersHtml = ` + "`" + `<div class="peers-summary">
+                    <p><strong>Connected Peers:</strong> ${data.n_peers || 0}</p>
+                    <p><strong>Listening:</strong> ${data.listening ? 'Yes' : 'No'}</p>
+                </div>` + "`" + `;
+
+                if (data.peers && data.peers.length > 0) {
+                    peersHtml += '<div class="peers-list">';
+                    data.peers.forEach(peer => {
+                        peersHtml += ` + "`" + `
+                            <div class="peer-card">
+                                <div class="peer-header">
+                                    <strong>${peer.moniker || 'Unknown'}</strong>
+                                    <span class="peer-id mono">${(peer.id || '').substring(0, 16)}...</span>
+                                </div>
+                                <div class="peer-details">
+                                    <div><strong>IP:</strong> ${peer.remote_ip || 'Unknown'}</div>
+                                    <div><strong>Version:</strong> ${peer.version || 'Unknown'}</div>
+                                    <div><strong>Network:</strong> ${peer.network || 'Unknown'}</div>
+                                    <div><strong>Duration:</strong> ${peer.duration || 'Unknown'}</div>
+                                </div>
+                            </div>
+                        ` + "`" + `;
+                    });
+                    peersHtml += '</div>';
+                } else {
+                    peersHtml += '<div class="no-data">No peers connected</div>';
+                }
+
+                connectedPeers.innerHTML = peersHtml;
+
+                peerStats.innerHTML = ` + "`" + `
+                    <div class="stats-grid">
+                        <div class="stat-item">
+                            <div class="stat-value">${data.n_peers || 0}</div>
+                            <div class="stat-label">Total Peers</div>
+                        </div>
+                        <div class="stat-item">
+                            <div class="stat-value">${data.listening ? '✅' : '❌'}</div>
+                            <div class="stat-label">Listening</div>
+                        </div>
+                    </div>
+                ` + "`" + `;
+            } catch (error) {
+                document.getElementById('connected-peers').innerHTML = '<div class="error">Error loading peers: ' + error.message + '</div>';
+                document.getElementById('peer-stats').innerHTML = '<div class="error">Error loading peer stats</div>';
+            }
+        }
+
+        async function loadNetworkConsensus() {
+            try {
+                const response = await fetch('/wallet/network/consensus');
+                if (!response.ok) throw new Error('Network request failed');
+                const data = await response.json();
+
+                const consensusState = document.getElementById('consensus-state');
+                const validatorsInfo = document.getElementById('validators-info');
+                const chainInfo = document.getElementById('chain-info');
+
+                consensusState.innerHTML = ` + "`" + `
+                    <div class="consensus-grid">
+                        <div class="consensus-item">
+                            <strong>Height:</strong> <span class="mono">${data.height || 'Unknown'}</span>
+                        </div>
+                        <div class="consensus-item">
+                            <strong>Round:</strong> <span class="mono">${data.round || 'Unknown'}</span>
+                        </div>
+                        <div class="consensus-item">
+                            <strong>Step:</strong> <span class="mono">${data.step || 'Unknown'}</span>
+                        </div>
+                        <div class="consensus-item">
+                            <strong>Start Time:</strong> <span>${data.start_time ? new Date(data.start_time).toLocaleString() : 'Unknown'}</span>
+                        </div>
+                    </div>
+                ` + "`" + `;
+
+                let validatorsHtml = '<div class="validators-list">';
+                if (data.validators && data.validators.length > 0) {
+                    data.validators.forEach(validator => {
+                        validatorsHtml += ` + "`" + `
+                            <div class="validator-card">
+                                <div class="validator-header">
+                                    <span class="validator-address mono">${(validator.address || '').substring(0, 20)}...</span>
+                                    <span class="validator-power">${validator.voting_power || '0'} power</span>
+                                </div>
+                                <div class="validator-pubkey mono">${(validator.pub_key?.value || '').substring(0, 32)}...</div>
+                            </div>
+                        ` + "`" + `;
+                    });
+                } else {
+                    validatorsHtml += '<div class="no-data">No validators found</div>';
+                }
+                validatorsHtml += '</div>';
+
+                validatorsInfo.innerHTML = validatorsHtml;
+
+                chainInfo.innerHTML = ` + "`" + `
+                    <div class="chain-stats">
+                        <div class="stat-item">
+                            <div class="stat-value">${data.total_validators || 0}</div>
+                            <div class="stat-label">Total Validators</div>
+                        </div>
+                    </div>
+                ` + "`" + `;
+            } catch (error) {
+                document.getElementById('consensus-state').innerHTML = '<div class="error">Error loading consensus state: ' + error.message + '</div>';
+                document.getElementById('validators-info').innerHTML = '<div class="error">Error loading validators</div>';
+                document.getElementById('chain-info').innerHTML = '<div class="error">Error loading chain info</div>';
+            }
         }
 
         function getSyndicateIcon(syndicate) {

@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -488,30 +489,28 @@ func (sn *ShadowNode) handleGetAddressBalance(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Calculate actual balance from blockchain
-	balance, err := calculateWalletBalanceWithDir(address, "")
+	// Proxy to explorer balance API
+	resp, err := http.Get("http://localhost:10001/api/v1/wallet/" + address)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to calculate balance: %v", err), http.StatusInternalServerError)
+		http.Error(w, fmt.Sprintf("Failed to get balance from explorer: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, "Balance API returned error", resp.StatusCode)
 		return
 	}
 
-	response := map[string]interface{}{
-		"address":                 address,
-		"balance":                 balance.ConfirmedShadow,
-		"balance_satoshis":        balance.ConfirmedBalance,
-		"confirmed":               balance.ConfirmedShadow,
-		"confirmed_satoshis":      balance.ConfirmedBalance,
-		"unconfirmed":             balance.PendingShadow - balance.ConfirmedShadow,
-		"unconfirmed_satoshis":    balance.PendingBalance - balance.ConfirmedBalance,
-		"total_received":          balance.TotalReceivedShadow,
-		"total_received_satoshis": balance.TotalReceived,
-		"total_sent":              balance.TotalSentShadow,
-		"total_sent_satoshis":     balance.TotalSent,
-		"transaction_count":       balance.TransactionCount,
-		"last_activity":           balance.LastActivity,
+	// Forward the response directly
+	w.Header().Set("Content-Type", "application/json")
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read balance response: %v", err), http.StatusInternalServerError)
+		return
 	}
-
-	json.NewEncoder(w).Encode(response)
+	
+	w.Write(body)
 }
 
 // Validate address endpoint
